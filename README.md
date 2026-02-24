@@ -42,7 +42,7 @@ LiquidDrop is designed for **trusted local networks** (your home/office WiFi):
 
 | Layer | How |
 |---|---|
-| **Secret URL token** | Every launch generates a random token — nobody can access the server without the exact URL |
+| **Secret URL token** | Every launch generates a random token so nobody can access the server without the exact URL |
 | **LAN only** | Binds to your local IP, never touches the internet |
 | **Path traversal protection** | All file operations are sandboxed to `~/LiquidDrop/` |
 | **No data collection** | Zero analytics, zero telemetry, zero external calls |
