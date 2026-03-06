@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════╗
-║          💧 LiquidDrop v2.2                  ║
+║          💧 LiquidDrop v3.0                  ║
 ║   Beautiful Local File Transfer              ║
 ║                                              ║
 ║   python3 liquiddrop.py              (HTTP)  ║
 ║   python3 liquiddrop.py --secure     (HTTPS) ║
 ║                                              ║
-║   Scan the QR code on your phone!            ║
+║   Scan the QR code or enter the PIN!         ║
 ╚══════════════════════════════════════════════╝
 """
 
@@ -20,11 +20,37 @@ from datetime import datetime, timedelta, timezone
 PORT = 7777
 UPLOAD_DIR = os.path.join(os.path.expanduser("~"), "LiquidDrop")
 CERT_DIR = os.path.join(UPLOAD_DIR, ".certs")
-TOKEN = secrets.token_urlsafe(8)
+TOKEN_FILE = os.path.join(UPLOAD_DIR, ".token")
 CHUNK = 256 * 1024
 SECURE = False
+PIN_CODE = ""
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def load_or_create_token(force_new=False):
+    """Load saved token from disk, or create a new one. Survives restarts."""
+    if not force_new and os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r") as f:
+                token = f.read().strip()
+            if token and len(token) >= 8:
+                return token
+        except Exception:
+            pass
+    token = secrets.token_urlsafe(8)
+    try:
+        with open(TOKEN_FILE, "w") as f:
+            f.write(token)
+    except Exception:
+        pass
+    return token
+
+def generate_pin(token):
+    """Derive a stable 4-digit PIN from the token."""
+    h = hashlib.sha256(token.encode()).hexdigest()
+    return str(int(h[:8], 16) % 10000).zfill(4)
+
+TOKEN = load_or_create_token()
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -40,15 +66,57 @@ LOCAL_IP = get_local_ip()
 
 # ── Dependency helper ────────────────────────────────────────────────────
 
+def _ensure_pip():
+    """Make sure pip is available; bootstrap it if missing."""
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "--version"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    print("  \033[33m📦 Bootstrapping pip (one-time)...\033[0m")
+    try:
+        import ensurepip
+        ensurepip.bootstrap(upgrade=True, default_pip=True)
+        return True
+    except Exception:
+        pass
+    try:
+        subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
 def pip_install(pkg, import_name=None):
     name = import_name or pkg
     try:
         return __import__(name)
     except ImportError:
-        print(f"  \033[33m📦 Installing {pkg} (one-time)...\033[0m")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return __import__(name)
+        pass
+    _ensure_pip()
+    strategies = [
+        [sys.executable, "-m", "pip", "install", pkg],
+        [sys.executable, "-m", "pip", "install", "--user", pkg],
+    ]
+    last_err = None
+    for cmd in strategies:
+        for attempt in range(2):
+            try:
+                label = "(retry) " if attempt else ""
+                print(f"  \033[33m📦 Installing {pkg} {label}(one-time)...\033[0m")
+                subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return __import__(name)
+            except subprocess.CalledProcessError as e:
+                last_err = e
+            except Exception as e:
+                last_err = e
+                break
+    print(f"  \033[31m❌ Could not install {pkg}.\033[0m")
+    print(f"  \033[31m   Please run manually: pip install {pkg}\033[0m")
+    if last_err:
+        print(f"  \033[90m   Error: {last_err}\033[0m")
+    sys.exit(1)
 
 # ── TLS Certificate (only used with --secure) ────────────────────────────
 
@@ -396,6 +464,11 @@ body{
   <h2>📱 Scan to open on another device</h2>
   <div class="qr-wrap"><img src="/""" + TOKEN + """/qr.png" alt="QR Code"></div>
   <div class="qr-url" id="urlCopy" title="Tap to copy">""" + BASE_URL + """</div>
+  <div style="margin-top:16px;padding:12px 18px;background:rgba(129,140,248,0.08);border:1px solid rgba(129,140,248,0.2);border-radius:16px">
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;font-weight:600">🔑 Or share this PIN code</div>
+    <div style="font-size:32px;font-weight:800;letter-spacing:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-family:'SF Mono',ui-monospace,monospace">""" + PIN_CODE + """</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:4px">Enter at <span style="font-family:'SF Mono',ui-monospace,monospace">""" + f"http://{LOCAL_IP}:{PORT}" + """</span></div>
+  </div>
 </div>
 
 <div class="dropzone glass fade-in" id="dropzone" style="animation-delay:.1s">
@@ -520,6 +593,84 @@ loadFiles();setInterval(loadFiles,3000);
 </html>"""
 
 
+# ── PIN Entry Page ────────────────────────────────────────────────────────
+
+def build_pin_page(error=False):
+    err_html = '<div style="color:#f472b6;font-size:13px;margin-top:12px;font-weight:600">Wrong PIN. Try again.</div>' if error else ''
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>LiquidDrop — Enter PIN</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0a0a1a;--glass:rgba(255,255,255,0.06);--glass-border:rgba(255,255,255,0.12);--accent:#6ee7b7;--accent2:#818cf8;--accent3:#f472b6;--text:#f0f0f5;--text2:rgba(255,255,255,0.55);--radius:24px;--safe-top:env(safe-area-inset-top,20px);--safe-bottom:env(safe-area-inset-bottom,20px)}
+html{height:100%;-webkit-text-size-adjust:100%}
+body{min-height:100%;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',sans-serif;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;padding:20px;-webkit-font-smoothing:antialiased}
+.orb{position:fixed;border-radius:50%;filter:blur(80px);opacity:.35;pointer-events:none;z-index:0}
+.orb-1{width:340px;height:340px;background:radial-gradient(circle,#6ee7b7,transparent 70%);top:-80px;right:-60px;animation:f1 12s ease-in-out infinite}
+.orb-2{width:400px;height:400px;background:radial-gradient(circle,#818cf8,transparent 70%);bottom:-100px;left:-80px;animation:f2 15s ease-in-out infinite}
+@keyframes f1{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-40px,30px) scale(1.1)}}
+@keyframes f2{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(30px,-40px) scale(1.15)}}
+.card{background:var(--glass);backdrop-filter:blur(40px) saturate(1.6);-webkit-backdrop-filter:blur(40px) saturate(1.6);border:1px solid var(--glass-border);border-radius:var(--radius);padding:40px 32px;max-width:380px;width:100%;text-align:center;position:relative;z-index:1;box-shadow:0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.08);animation:fadeIn .5s ease both}
+.card::before{content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,transparent 50%);pointer-events:none}
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+.logo{font-size:48px;margin-bottom:8px;display:block;filter:drop-shadow(0 0 20px rgba(110,231,183,0.4))}
+h1{font-size:28px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2),var(--accent3));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;letter-spacing:-0.5px;margin-bottom:6px}
+.subtitle{color:var(--text2);font-size:14px;margin-bottom:28px}
+.pin-row{display:flex;gap:12px;justify-content:center;margin-bottom:8px}
+.pin-box{width:58px;height:68px;border:2px solid var(--glass-border);border-radius:16px;background:rgba(255,255,255,0.04);font-size:28px;font-weight:800;color:var(--text);text-align:center;font-family:'SF Mono',ui-monospace,monospace;outline:none;transition:all .2s ease;-webkit-appearance:none;caret-color:var(--accent)}
+.pin-box:focus{border-color:var(--accent);background:rgba(110,231,183,0.06);box-shadow:0 0 20px rgba(110,231,183,0.15)}
+.pin-box.error{border-color:var(--accent3);animation:shake .4s ease}
+@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-6px)}40%,80%{transform:translateX(6px)}}
+.submit-btn{width:100%;padding:16px;border:none;border-radius:16px;font-size:16px;font-weight:700;cursor:pointer;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0a0a1a;margin-top:20px;transition:all .2s ease;font-family:inherit}
+.submit-btn:hover{box-shadow:0 0 24px rgba(110,231,183,0.3);transform:translateY(-1px)}
+.submit-btn:active{transform:scale(0.98)}
+</style>
+</head>
+<body>
+<div class="orb orb-1"></div><div class="orb orb-2"></div>
+<div class="card">
+  <span class="logo">\U0001f4a7</span>
+  <h1>LiquidDrop</h1>
+  <p class="subtitle">Enter the 4-digit PIN to connect</p>
+  <form method="POST" action="/pin" id="pinForm">
+    <div class="pin-row">
+      <input class="pin-box""" + (' error' if error else '') + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d1" id="d1" autofocus autocomplete="off">
+      <input class="pin-box""" + (' error' if error else '') + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d2" id="d2" autocomplete="off">
+      <input class="pin-box""" + (' error' if error else '') + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d3" id="d3" autocomplete="off">
+      <input class="pin-box""" + (' error' if error else '') + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d4" id="d4" autocomplete="off">
+    </div>
+    """ + err_html + """
+    <button type="submit" class="submit-btn">\U0001f4a7 Connect</button>
+  </form>
+</div>
+<script>
+const boxes=document.querySelectorAll('.pin-box');
+boxes.forEach((b,i)=>{
+  b.addEventListener('input',e=>{
+    b.value=b.value.replace(/[^0-9]/g,'');
+    if(b.value&&i<3)boxes[i+1].focus();
+    if([...boxes].every(x=>x.value))document.getElementById('pinForm').submit();
+  });
+  b.addEventListener('keydown',e=>{
+    if(e.key==='Backspace'&&!b.value&&i>0){boxes[i-1].focus();boxes[i-1].value='';}
+  });
+  b.addEventListener('paste',e=>{
+    e.preventDefault();
+    const p=(e.clipboardData||window.clipboardData).getData('text').replace(/[^0-9]/g,'');
+    for(let j=0;j<4&&j<p.length;j++){boxes[j].value=p[j];}
+    if(p.length>=4)document.getElementById('pinForm').submit();
+  });
+});
+</script>
+</body>
+</html>"""
+
+
 # ── Server ───────────────────────────────────────────────────────────────
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -529,14 +680,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif "404" in msg or "403" in msg: print(f"  \033[90m{ts}\033[0m  \033[33m{msg}\033[0m")
         else: print(f"  \033[90m{ts}\033[0m  {msg}")
 
-    def check_token(self):
+    def _is_authed(self):
+        """Check if the request path starts with the correct token."""
         parts = self.path.strip('/').split('/')
-        if not parts or parts[0] != TOKEN: self.send_error(403, "Forbidden"); return False
-        return True
+        return parts and parts[0] == TOKEN
 
     def do_GET(self):
-        if not self.check_token(): return
-        parts = self.path.strip('/').split('/', 2); route = parts[1] if len(parts) > 1 else ''
+        path_stripped = self.path.strip('/')
+        parts = path_stripped.split('/', 2)
+
+        # ── Unauthenticated routes (PIN entry page) ──
+        if not parts[0] or parts[0] != TOKEN:
+            # Root URL or unknown path → show PIN entry page
+            if path_stripped == '' or path_stripped == 'pin':
+                html = build_pin_page()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Cache-Control', 'no-cache'); self.end_headers()
+                self.wfile.write(html.encode())
+            else:
+                self.send_error(403, "Forbidden")
+            return
+
+        # ── Authenticated routes (token prefix valid) ──
+        route = parts[1] if len(parts) > 1 else ''
 
         if route == '' or route == 'index.html':
             html = build_html_page()
@@ -571,7 +736,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else: self.send_error(404)
 
     def do_POST(self):
-        if not self.check_token(): return
+        path_stripped = self.path.strip('/')
+
+        # ── Unauthenticated POST: PIN verification ──
+        if path_stripped == 'pin':
+            cl = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(cl).decode('utf-8', errors='replace')
+            params = urllib.parse.parse_qs(body)
+            entered = ''.join([params.get(f'd{i}', [''])[0] for i in range(1, 5)])
+            if entered == PIN_CODE:
+                # Correct PIN → redirect to the full token URL
+                self.send_response(302)
+                self.send_header('Location', f'/{TOKEN}/')
+                self.end_headers()
+                print(f"  \033[32m🔑 PIN accepted — device connected\033[0m")
+            else:
+                # Wrong PIN → show error page
+                html = build_pin_page(error=True)
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(html.encode())
+                print(f"  \033[33m🔑 Wrong PIN attempt\033[0m")
+            return
+
+        # ── Authenticated POST routes ──
+        if not self._is_authed():
+            self.send_error(403, "Forbidden"); return
         parts = self.path.strip('/').split('/'); route = parts[1] if len(parts) > 1 else ''
         if route == 'upload':
             ct = self.headers.get('Content-Type', '')
@@ -590,7 +779,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else: self.send_error(404)
 
     def do_DELETE(self):
-        if not self.check_token(): return
+        if not self._is_authed():
+            self.send_error(403, "Forbidden"); return
         parts = self.path.strip('/').split('/', 2); route = parts[1] if len(parts) > 1 else ''
         if route == 'delete' and len(parts) > 2:
             fname = urllib.parse.unquote(parts[2]); fpath = Path(UPLOAD_DIR) / fname
@@ -606,25 +796,32 @@ class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 def main():
-    global BASE_URL, SECURE
+    global BASE_URL, SECURE, TOKEN, PIN_CODE, PORT
 
     parser = argparse.ArgumentParser(description="💧 LiquidDrop — Local File Transfer")
     parser.add_argument("--secure", action="store_true", help="Enable HTTPS with self-signed TLS certificate")
     parser.add_argument("--port", type=int, default=PORT, help=f"Port number (default: {PORT})")
+    parser.add_argument("--new-token", action="store_true", help="Generate a new token (invalidates old bookmarks)")
     args = parser.parse_args()
     SECURE = args.secure
     port = args.port
+    PORT = port
+
+    if args.new_token:
+        TOKEN = load_or_create_token(force_new=True)
+
+    PIN_CODE = generate_pin(TOKEN)
 
     os.system('cls' if os.name == 'nt' else 'clear')
     print()
 
     if SECURE:
-        print("  \033[1;96m💧 LiquidDrop v2.2 — Secure Mode (HTTPS)\033[0m")
+        print("  \033[1;96m💧 LiquidDrop v3.0 — Secure Mode (HTTPS)\033[0m")
         print("  \033[90m" + "─"*50 + "\033[0m\n")
         generate_certificate()
         BASE_URL = f"https://{LOCAL_IP}:{port}/{TOKEN}"
     else:
-        print("  \033[1;96m💧 LiquidDrop v2.2\033[0m")
+        print("  \033[1;96m💧 LiquidDrop v3.0\033[0m")
         print("  \033[90m" + "─"*50 + "\033[0m\n")
         BASE_URL = f"http://{LOCAL_IP}:{port}/{TOKEN}"
 
@@ -634,15 +831,20 @@ def main():
     os.system('cls' if os.name == 'nt' else 'clear')
     print()
     if SECURE:
-        print("  \033[1;96m💧 LiquidDrop v2.2 — Secure Mode (HTTPS)\033[0m")
+        print("  \033[1;96m💧 LiquidDrop v3.0 — Secure Mode (HTTPS)\033[0m")
     else:
-        print("  \033[1;96m💧 LiquidDrop v2.2\033[0m")
+        print("  \033[1;96m💧 LiquidDrop v3.0\033[0m")
     print("  \033[90m" + "─"*50 + "\033[0m\n")
     print_terminal_qr(qr)
     print()
     print("  \033[90m" + "─"*50 + "\033[0m")
     print(f"  \033[1;97m📱 Scan the QR or open:\033[0m")
     print(f"  \033[1;92m   {BASE_URL}\033[0m\n")
+
+    protocol = "https" if SECURE else "http"
+    pin_url = f"{protocol}://{LOCAL_IP}:{port}"
+    print(f"  \033[1;97m\U0001f511 Or enter PIN:  \033[1;93m{PIN_CODE}\033[0m")
+    print(f"  \033[90m   at {pin_url}\033[0m\n")
 
     if SECURE:
         print(f"  \033[1;32m🔒 HTTPS Enabled — TLS Encrypted\033[0m")
@@ -654,6 +856,7 @@ def main():
         print(f"  \033[90m   Add --secure for full HTTPS/TLS encryption\033[0m\n")
 
     print(f"  \033[90mFiles: ~/LiquidDrop  ·  Streaming 256KB chunks\033[0m")
+    print(f"  \033[90mURL is stable — bookmarks & home screen shortcuts persist\033[0m")
     print(f"  \033[90mPress Ctrl+C to stop\033[0m")
     print("  \033[90m" + "─"*50 + "\033[0m\n")
 

@@ -6,14 +6,14 @@
   <em>Move files between your phone and computer. Nothing else.</em>
   <br><br>
   <img src="https://img.shields.io/badge/python-3.7+-blue?style=flat-square&logo=python&logoColor=white">
-  <img src="https://img.shields.io/badge/dependencies-1-green?style=flat-square">
+  <img src="https://img.shields.io/badge/dependencies-auto--installed-green?style=flat-square">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square">
   <img src="https://img.shields.io/badge/license-MIT-purple?style=flat-square">
 </p>
 
 ---
 
-One Python file. No accounts. No cloud. No install on the receiving device. Run it, scan the QR, transfer files.
+One Python file. No accounts. No cloud. No install on the receiving device. Run it, scan the QR (or enter the PIN), transfer files.
 
 ## Why
 
@@ -23,6 +23,8 @@ Every other file transfer tool wants you to install an app on both devices. Liqu
 
 - Single command to start, browser opens automatically
 - QR code in your terminal and in the web UI
+- **PIN code join** — 4-digit PIN as a fallback when QR scanning isn't convenient
+- **Stable URLs** — bookmarks and iPhone home screen shortcuts survive server restarts
 - Works both ways: phone to desktop, desktop to phone
 - Drag and drop on desktop, tap to pick on mobile
 - 3+ files? Offers to zip them into one bundle
@@ -32,6 +34,7 @@ Every other file transfer tool wants you to install an app on both devices. Liqu
 - Handles any file type, no size limit
 - Pin it to your iPhone home screen for app-like access
 - Files auto-appear on both devices within seconds
+- **Zero-fail dependency install** — auto-installs everything, even if pip is missing
 
 ## Quick Start
 
@@ -48,19 +51,24 @@ cd liquiddrop
 python3 liquiddrop.py              # standard mode, no warnings
 python3 liquiddrop.py --secure     # HTTPS mode, full TLS encryption
 python3 liquiddrop.py --port 8888  # custom port
+python3 liquiddrop.py --new-token  # regenerate URL (invalidates old bookmarks)
 ```
 
 ### 3. Connect your phone
 
-Point your camera at the QR code in the terminal. Tap the link. You're in.
+**Option A — QR Code:** Point your camera at the QR code in the terminal. Tap the link. You're in.
 
-**Optional:** In Safari, tap Share > Add to Home Screen to make it feel like a native app.
+**Option B — PIN Code:** Open `http://<your-ip>:7777` on any device. Enter the 4-digit PIN shown in the terminal. You're in.
+
+**Optional:** In Safari, tap Share > Add to Home Screen to make it feel like a native app. The URL is stable — it will work even after restarting the server.
 
 ### Requirements
 
 - Python 3.7+
 - `qrcode` library (auto-installs on first run, or `pip install qrcode[pil]`)
 - `cryptography` library if using `--secure` (also auto-installs)
+
+All dependencies auto-install on first run. If pip itself is missing, LiquidDrop will bootstrap it automatically.
 
 ## How It Works
 
@@ -70,9 +78,9 @@ Point your camera at the QR code in the terminal. Tap the link. You're in.
 │              │                       │              │
 │  python3     │   http://10.x.x.x    │  Safari /    │
 │  liquiddrop  │   :7777/token        │  Home Screen │
-│  .py         │ <-------------------> │              │
-│              │                       │              │
-│  ~/LiquidDrop/  <-- files land here  │              │
+│  .py         │ <------------------> │              │
+│              │                       │  Or enter    │
+│  ~/LiquidDrop/  <-- files land here  │  PIN: 1234   │
 └──────────────┘                       └──────────────┘
 ```
 
@@ -90,11 +98,12 @@ For home and office WiFi. No browser warnings, totally seamless.
 
 | What | How |
 |---|---|
-| Secret URL token | Random token generated on every launch. Can't be guessed. |
+| Secret URL token | Random token persisted across restarts. Can't be guessed. |
+| PIN entry | 4-digit PIN derived from the token. Shown in terminal and web UI. |
 | LAN only | Never touches the internet. |
 | WiFi encryption | Your router's WPA2/WPA3 already encrypts local traffic. |
 | Sandboxed | All files locked to `~/LiquidDrop/`. Path traversal blocked. |
-| Ephemeral | Token dies when you stop the server. Old links don't work. |
+| Regenerate | Run `--new-token` to invalidate old URLs and start fresh. |
 
 ### Secure (`--secure` flag)
 
