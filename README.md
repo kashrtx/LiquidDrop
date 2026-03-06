@@ -74,7 +74,7 @@ All dependencies auto-install on first run. If pip itself is missing, LiquidDrop
 
 ```
 ┌──────────────┐         WiFi          ┌──────────────┐
-│   Desktop    │  <--- same network -->│   iPhone     │
+│   Desktop    │ <--- same network --> │   iPhone     │
 │              │                       │              │
 │  python3     │   http://10.x.x.x     │  Safari /    │
 │  liquiddrop  │   :7777/token         │  Home Screen │
