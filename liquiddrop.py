@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════╗
-║          💧 LiquidDrop v3.0                  ║
+║          💧 LiquidDrop v3.1                  ║
 ║   Beautiful Local File Transfer              ║
 ║                                              ║
 ║   python3 liquiddrop.py              (HTTP)  ║
@@ -13,7 +13,7 @@
 
 import http.server, socketserver, os, sys, socket, json, secrets
 import urllib.parse, mimetypes, shutil, signal, subprocess, io
-import webbrowser, threading, ssl, hashlib, argparse
+import webbrowser, threading, ssl, hashlib, argparse, time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -25,7 +25,13 @@ CHUNK = 256 * 1024
 SECURE = False
 PIN_CODE = ""
 
+# PIN brute-force protection
+_pin_fails = {}          # ip -> (fail_count, last_fail_time)
+_PIN_MAX_FAILS = 5
+_PIN_LOCKOUT_SECS = 60
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 
 def load_or_create_token(force_new=False):
     """Load saved token from disk, or create a new one. Survives restarts."""
@@ -45,12 +51,15 @@ def load_or_create_token(force_new=False):
         pass
     return token
 
+
 def generate_pin(token):
     """Derive a stable 4-digit PIN from the token."""
     h = hashlib.sha256(token.encode()).hexdigest()
     return str(int(h[:8], 16) % 10000).zfill(4)
 
+
 TOKEN = load_or_create_token()
+
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -62,15 +71,19 @@ def get_local_ip():
     finally:
         s.close()
 
+
 LOCAL_IP = get_local_ip()
 
 # ── Dependency helper ────────────────────────────────────────────────────
 
+
 def _ensure_pip():
     """Make sure pip is available; bootstrap it if missing."""
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "--version"],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "--version"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
@@ -82,11 +95,14 @@ def _ensure_pip():
     except Exception:
         pass
     try:
-        subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(
+            [sys.executable, "-m", "ensurepip", "--upgrade"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         return True
     except Exception:
         return False
+
 
 def pip_install(pkg, import_name=None):
     name = import_name or pkg
@@ -118,11 +134,13 @@ def pip_install(pkg, import_name=None):
         print(f"  \033[90m   Error: {last_err}\033[0m")
     sys.exit(1)
 
+
 # ── TLS Certificate (only used with --secure) ────────────────────────────
 
 CERT_FILE = os.path.join(CERT_DIR, "cert.pem")
 KEY_FILE = os.path.join(CERT_DIR, "key.pem")
 CERT_FINGERPRINT = ""
+
 
 def generate_certificate():
     global CERT_FINGERPRINT
@@ -167,20 +185,31 @@ def generate_certificate():
             x509.IPAddress(ipaddress.ip_address(LOCAL_IP)),
             x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
         ]), critical=False)
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None), critical=True,
+        )
         .sign(key, hashes.SHA256())
     )
 
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-    key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
 
-    with open(CERT_FILE, "wb") as f: f.write(cert_pem)
-    with open(KEY_FILE, "wb") as f: f.write(key_pem)
-    try: os.chmod(KEY_FILE, 0o600)
-    except Exception: pass
+    with open(CERT_FILE, "wb") as f:
+        f.write(cert_pem)
+    with open(KEY_FILE, "wb") as f:
+        f.write(key_pem)
+    try:
+        os.chmod(KEY_FILE, 0o600)
+    except Exception:
+        pass
 
     CERT_FINGERPRINT = format_fingerprint(cert_pem)
     print("  \033[32m🔒 TLS certificate generated (valid 1 year)\033[0m")
+
 
 def format_fingerprint(cert_pem):
     from cryptography import x509
@@ -188,145 +217,278 @@ def format_fingerprint(cert_pem):
     cert = x509.load_pem_x509_certificate(cert_pem)
     der = cert.public_bytes(serialization.Encoding.DER)
     digest = hashlib.sha256(der).hexdigest().upper()
-    return ":".join(digest[i:i+2] for i in range(0, len(digest), 2))
+    return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
+
 
 # ── QR Code ──────────────────────────────────────────────────────────────
 
 BASE_URL = ""
 QR_PNG_BYTES = None
 
+
 def generate_qr():
     global QR_PNG_BYTES
     qrcode = pip_install("qrcode[pil]", "qrcode")
-    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=3)
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=3,
+    )
     qr.add_data(BASE_URL)
     qr.make(fit=True)
     try:
         from PIL import Image as PILImage
         img = qr.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO(); img.save(buf, format="PNG"); QR_PNG_BYTES = buf.getvalue()
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        QR_PNG_BYTES = buf.getvalue()
     except ImportError:
         QR_PNG_BYTES = matrix_to_png(qr.get_matrix())
     return qr
 
+
 def matrix_to_png(matrix):
     import struct, zlib
     scale, border = 10, 30
-    n = len(matrix); w = h = n * scale + border * 2
+    n = len(matrix)
+    w = h = n * scale + border * 2
     raw = bytearray()
     for y in range(h):
         raw.append(0)
         for x in range(w):
             mx, my = (x - border) // scale, (y - border) // scale
-            raw.append(0 if 0 <= mx < n and 0 <= my < n and matrix[my][mx] else 255)
+            raw.append(
+                0 if 0 <= mx < n and 0 <= my < n and matrix[my][mx] else 255
+            )
+
     def chunk(ct, d):
-        c = ct + d; return struct.pack('>I', len(d)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
-    sig = b'\x89PNG\r\n\x1a\n'
-    ihdr = struct.pack('>IIBBBBB', w, h, 8, 0, 0, 0, 0)
-    return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(bytes(raw), 9)) + chunk(b'IEND', b'')
+        c = ct + d
+        return (
+            struct.pack(">I", len(d))
+            + c
+            + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+        )
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0)
+    return (
+        sig
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + chunk(b"IEND", b"")
+    )
+
 
 def print_terminal_qr(qr):
     try:
-        matrix = qr.get_matrix(); padded = list(matrix)
-        if len(padded) % 2: padded.append([False]*len(matrix[0]))
+        matrix = qr.get_matrix()
+        padded = list(matrix)
+        if len(padded) % 2:
+            padded.append([False] * len(matrix[0]))
         for r in range(0, len(padded), 2):
             line = "  "
             for c in range(len(padded[0])):
-                top, bot = padded[r][c], padded[r+1][c] if r+1 < len(padded) else False
-                if top and bot: line += "█"
-                elif top: line += "▀"
-                elif bot: line += "▄"
-                else: line += " "
+                top = padded[r][c]
+                bot = padded[r + 1][c] if r + 1 < len(padded) else False
+                if top and bot:
+                    line += "█"
+                elif top:
+                    line += "▀"
+                elif bot:
+                    line += "▄"
+                else:
+                    line += " "
             print(f"\033[97m{line}\033[0m")
     except Exception as e:
         print(f"  \033[33m(QR error: {e})\033[0m")
 
+
 # ── Streaming Multipart Parser ───────────────────────────────────────────
+
 
 class StreamingMultipartParser:
     def __init__(self, rfile, boundary, content_length):
         self.rfile = rfile
-        self.boundary = b'--' + boundary
-        self.end_boundary = self.boundary + b'--'
+        self.boundary = b"--" + boundary
+        self.end_boundary = self.boundary + b"--"
         self.content_length = content_length
         self.bytes_read = 0
 
     def _read(self, n):
         remaining = self.content_length - self.bytes_read
         to_read = min(n, remaining)
-        if to_read <= 0: return b''
-        data = self.rfile.read(to_read); self.bytes_read += len(data); return data
+        if to_read <= 0:
+            return b""
+        data = self.rfile.read(to_read)
+        self.bytes_read += len(data)
+        return data
 
     def _readline(self, limit=65536):
         remaining = self.content_length - self.bytes_read
-        if remaining <= 0: return b''
-        data = self.rfile.readline(min(limit, remaining)); self.bytes_read += len(data); return data
+        if remaining <= 0:
+            return b""
+        data = self.rfile.readline(min(limit, remaining))
+        self.bytes_read += len(data)
+        return data
 
     def parse(self):
+        # Skip the initial boundary line
         self._readline()
         while self.bytes_read < self.content_length:
+            # Parse headers
             headers = {}
             while True:
                 line = self._readline()
-                if not line or line.strip() == b'': break
-                if b':' in line:
-                    k, v = line.split(b':', 1); headers[k.strip().lower()] = v.strip()
-            if not headers: break
+                if not line or line.strip() == b"":
+                    break
+                if b":" in line:
+                    k, v = line.split(b":", 1)
+                    headers[k.strip().lower()] = v.strip()
+            if not headers:
+                break
 
-            disp = headers.get(b'content-disposition', b'').decode('utf-8', errors='replace')
+            # Extract filename
+            disp = headers.get(b"content-disposition", b"").decode(
+                "utf-8", errors="replace"
+            )
             filename = None
             if 'filename="' in disp:
-                fn_start = disp.find('filename="') + 10; fn_end = disp.find('"', fn_start)
+                fn_start = disp.find('filename="') + 10
+                fn_end = disp.find('"', fn_start)
                 filename = Path(disp[fn_start:fn_end]).name
-            if not filename or filename.startswith('.'): filename = f"file_{secrets.token_hex(4)}"
+
+            # Sanitize filename — reject dotfiles and empty names
+            if not filename or filename.startswith("."):
+                filename = f"file_{secrets.token_hex(4)}"
+
+            # Strip null bytes, control characters, and path separators
+            filename = "".join(
+                c for c in filename if c.isprintable() and c not in '/\\:\x00'
+            )
+            if not filename:
+                filename = f"file_{secrets.token_hex(4)}"
 
             dest = Path(UPLOAD_DIR) / filename
             if dest.exists():
-                stem, suffix = dest.stem, dest.suffix; c = 1
-                while dest.exists(): dest = Path(UPLOAD_DIR) / f"{stem} ({c}){suffix}"; c += 1
+                stem, suffix = dest.stem, dest.suffix
+                c = 1
+                while dest.exists():
+                    dest = Path(UPLOAD_DIR) / f"{stem} ({c}){suffix}"
+                    c += 1
 
-            boundary_bytes = b'\r\n' + self.boundary; written = 0
-            with open(dest, 'wb') as f:
-                buf = b''
+            boundary_bytes = b"\r\n" + self.boundary
+            written = 0
+            with open(dest, "wb") as f:
+                buf = b""
                 while self.bytes_read < self.content_length:
                     chunk = self._read(CHUNK)
                     if not chunk:
-                        if buf: f.write(buf); written += len(buf)
+                        if buf:
+                            f.write(buf)
+                            written += len(buf)
                         break
                     buf += chunk
                     idx = buf.find(boundary_bytes)
                     if idx != -1:
-                        if idx > 0: f.write(buf[:idx]); written += idx
+                        if idx > 0:
+                            f.write(buf[:idx])
+                            written += idx
                         after = buf[idx + len(boundary_bytes):]
                         if len(after) < 2 and self.bytes_read < self.content_length:
                             after += self._read(2 - len(after))
-                        if after.startswith(b'--'): yield filename, dest, written; return
-                        elif after.startswith(b'\r\n'): yield filename, dest, written; break
-                        else: yield filename, dest, written; return
+                        if after.startswith(b"--"):
+                            yield filename, dest, written
+                            return
+                        elif after.startswith(b"\r\n"):
+                            yield filename, dest, written
+                            break
+                        else:
+                            yield filename, dest, written
+                            return
                     else:
-                        holdback = len(boundary_bytes) + 2; safe = len(buf) - holdback
-                        if safe > 0: f.write(buf[:safe]); written += safe; buf = buf[safe:]
+                        holdback = len(boundary_bytes) + 2
+                        safe = len(buf) - holdback
+                        if safe > 0:
+                            f.write(buf[:safe])
+                            written += safe
+                            buf = buf[safe:]
                         if len(buf) > CHUNK * 4:
                             flush = len(buf) - holdback
-                            if flush > 0: f.write(buf[:flush]); written += flush; buf = buf[flush:]
+                            if flush > 0:
+                                f.write(buf[:flush])
+                                written += flush
+                                buf = buf[flush:]
                 else:
+                    # Reached content_length — strip trailing boundary markers
                     if buf:
-                        for ending in [b'\r\n' + self.end_boundary + b'\r\n', b'\r\n' + self.end_boundary + b'--',
-                                       b'\r\n' + self.end_boundary, b'\r\n' + self.boundary]:
-                            if buf.endswith(ending): buf = buf[:-len(ending)]; break
-                        if buf: f.write(buf); written += len(buf)
-                    yield filename, dest, written; return
+                        for ending in [
+                            b"\r\n" + self.end_boundary + b"\r\n",
+                            b"\r\n" + self.end_boundary + b"--",
+                            b"\r\n" + self.end_boundary,
+                            b"\r\n" + self.boundary,
+                        ]:
+                            if buf.endswith(ending):
+                                buf = buf[: -len(ending)]
+                                break
+                        if buf:
+                            f.write(buf)
+                            written += len(buf)
+                    yield filename, dest, written
+                    return
             yield filename, dest, written
 
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _safe_path(filename):
+    """Resolve a filename within UPLOAD_DIR; return Path or None if invalid."""
+    fpath = (Path(UPLOAD_DIR) / filename).resolve()
+    upload_dir = Path(UPLOAD_DIR).resolve()
+    if fpath.parent != upload_dir or not fpath.is_file():
+        return None
+    return fpath
+
+
+def _check_pin_rate_limit(ip):
+    """Return True if this IP is currently locked out from PIN attempts."""
+    entry = _pin_fails.get(ip)
+    if not entry:
+        return False
+    fails, last_time = entry
+    if fails >= _PIN_MAX_FAILS:
+        if time.time() - last_time < _PIN_LOCKOUT_SECS:
+            return True
+        # Lockout expired — reset
+        del _pin_fails[ip]
+    return False
+
+
+def _record_pin_fail(ip):
+    entry = _pin_fails.get(ip, (0, 0))
+    _pin_fails[ip] = (entry[0] + 1, time.time())
+
+
+def _clear_pin_fails(ip):
+    _pin_fails.pop(ip, None)
+
+
 # ── HTML UI ──────────────────────────────────────────────────────────────
+
 
 def build_html_page():
     protocol = "HTTPS" if SECURE else "HTTP"
     lock_icon = "🔒" if SECURE else "🌐"
     sec_label = "TLS Encrypted · HTTPS" if SECURE else "Local Network · HTTP"
-    sec_detail = f"SHA-256: {CERT_FINGERPRINT[:23]}…" if SECURE else "Secret token protected · WiFi encrypted (WPA)"
+    sec_detail = (
+        f"SHA-256: {CERT_FINGERPRINT[:23]}…"
+        if SECURE
+        else "Secret token protected · WiFi encrypted (WPA)"
+    )
 
-    return """<!DOCTYPE html>
+    return (
+        """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -398,8 +560,7 @@ body{
 .progress-fill{height:100%;border-radius:3px;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .15s linear;box-shadow:0 0 16px rgba(110,231,183,0.3)}
 .section-title{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--text2);padding:0 8px;margin:20px 0 10px}
 .file-list{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
-.file-card{padding:14px 18px;display:flex;align-items:center;gap:14px;cursor:pointer;transition:all .25s ease;text-decoration:none;color:inherit}
-.file-card:hover{background:var(--glass-hi);transform:translateX(4px)}
+.file-card{padding:14px 18px;display:flex;align-items:center;gap:14px;cursor:default;transition:all .25s ease;text-decoration:none;color:inherit}
 .file-card:active{transform:scale(0.985)}
 .file-icon{width:44px;height:44px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;background:linear-gradient(135deg,rgba(110,231,183,0.15),rgba(129,140,248,0.15));border:1px solid rgba(255,255,255,0.08)}
 .file-icon.img-type{background:linear-gradient(135deg,rgba(244,114,182,0.2),rgba(251,146,60,0.15))}
@@ -408,11 +569,11 @@ body{
 .file-meta{flex:1;min-width:0}
 .file-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .file-detail{font-size:12px;color:var(--text2);margin-top:2px}
-.file-dl{font-size:18px;opacity:.4;flex-shrink:0;transition:opacity .2s}
-.file-card:hover .file-dl{opacity:.8}
-.file-delete{font-size:14px;opacity:0;flex-shrink:0;padding:6px;cursor:pointer;transition:all .2s;border:none;background:transparent;color:rgba(255,100,100,0.7);border-radius:8px}
-.file-card:hover .file-delete{opacity:.6}
-.file-delete:hover{opacity:1!important;background:rgba(255,100,100,0.1)}
+.file-dl{font-size:15px;flex-shrink:0;transition:all .2s;padding:10px 12px;border-radius:12px;background:rgba(110,231,183,0.08);color:var(--accent);text-decoration:none;display:flex;align-items:center;justify-content:center;line-height:1}
+.file-dl:hover{background:rgba(110,231,183,0.18);color:var(--accent)}
+.file-delete{font-size:15px;flex-shrink:0;padding:10px 12px;cursor:pointer;transition:all .2s;border:none;background:rgba(255,80,80,0.08);color:rgba(255,100,100,0.8);border-radius:12px;display:flex;align-items:center;justify-content:center;line-height:1}
+.file-delete:hover{background:rgba(255,80,80,0.18);color:rgba(255,100,100,1)}
+.file-delete:active{transform:scale(0.92)}
 .empty-state{text-align:center;padding:40px 20px;color:var(--text2);font-size:14px}
 .empty-state span{font-size:36px;display:block;margin-bottom:10px;opacity:.5}
 .toast{position:fixed;bottom:calc(var(--safe-bottom) + 24px);left:50%;transform:translateX(-50%) translateY(80px);background:rgba(20,20,35,0.92);backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:16px;padding:12px 22px;font-size:14px;font-weight:600;z-index:999;opacity:0;transition:all .4s cubic-bezier(.4,0,.2,1);pointer-events:none;box-shadow:0 12px 40px rgba(0,0,0,0.4);white-space:nowrap}
@@ -434,6 +595,59 @@ body{
 .btn-zip:hover{box-shadow:0 0 24px rgba(110,231,183,0.3)}
 .btn-separate{background:rgba(255,255,255,0.08);color:var(--text);border:1px solid var(--glass-border)}
 .btn-separate:hover{background:rgba(255,255,255,0.12)}
+
+/* ── Custom checkbox — fully suppress native rendering ── */
+.file-checkbox{
+  width:20px;height:20px;border-radius:6px;border:2px solid var(--glass-border);
+  background-color:rgba(255,255,255,0.04);background-image:none;
+  appearance:none;-webkit-appearance:none;-moz-appearance:none;
+  cursor:pointer;flex-shrink:0;transition:all .2s;position:relative;
+  margin:0;padding:0;
+  /* Kill any text/glyph the browser might render inside the checkbox */
+  color:transparent !important;font-size:0 !important;line-height:0 !important;
+  text-indent:-9999px;overflow:hidden;
+  -webkit-font-smoothing:none;
+}
+.file-checkbox::before,.file-checkbox::after{display:none !important;content:none !important}
+.file-checkbox::-ms-check{display:none}
+.file-checkbox:checked{
+  background-color:transparent;
+  border-color:transparent;
+  /* Gradient fill + checkmark as a single SVG — no url(#id) refs for cross-browser safety */
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 20 20' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='20' height='20' rx='6' fill='%236ee7b7'/%3E%3Cpath d='M6 10l3 3 5-6' stroke='%230a0a1a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:center;background-size:100% 100%;
+}
+.file-checkbox:checked::before,.file-checkbox:checked::after{display:none !important;content:none !important}
+
+.batch-toolbar{display:none;align-items:center;gap:10px;padding:12px 18px;margin:0 0 10px}
+.batch-toolbar.show{display:flex}
+.batch-info{flex:1;font-size:13px;font-weight:600;color:var(--text2)}
+.batch-info strong{color:var(--accent)}
+.batch-btn{padding:10px 16px;border:none;border-radius:14px;font-size:13px;font-weight:700;cursor:pointer;transition:all .2s;font-family:inherit;display:flex;align-items:center;gap:6px}
+.batch-btn:active{transform:scale(0.96)}
+.batch-btn.del{background:rgba(255,80,80,0.12);color:rgba(255,120,120,0.9);border:1px solid rgba(255,80,80,0.2)}
+.batch-btn.del:hover{background:rgba(255,80,80,0.2)}
+.batch-btn.dl{background:rgba(110,231,183,0.1);color:var(--accent);border:1px solid rgba(110,231,183,0.2)}
+.batch-btn.dl:hover{background:rgba(110,231,183,0.18)}
+.select-all-wrap{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text2);font-weight:600;padding:2px 0;user-select:none;-webkit-user-select:none}
+.select-all-wrap:hover{color:var(--text)}
+.confirm-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);z-index:950;display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;pointer-events:none;transition:opacity .3s ease}
+.confirm-overlay.show{opacity:1;pointer-events:auto}
+.confirm-box{background:rgba(20,20,40,0.95);border:1px solid var(--glass-border);border-radius:24px;padding:28px 24px;max-width:360px;width:100%;text-align:center;transform:scale(0.92) translateY(10px);transition:transform .35s cubic-bezier(.4,0,.2,1);box-shadow:0 24px 64px rgba(0,0,0,0.5)}
+.confirm-overlay.show .confirm-box{transform:scale(1) translateY(0)}
+.confirm-icon{font-size:40px;margin-bottom:10px}
+.confirm-box h3{font-size:18px;font-weight:700;margin-bottom:6px}
+.confirm-box p{font-size:13px;color:var(--text2);margin-bottom:20px;line-height:1.5}
+.confirm-box p strong{color:var(--text)}
+.confirm-buttons{display:flex;gap:10px}
+.confirm-btn{flex:1;padding:14px 8px;border:none;border-radius:16px;font-size:14px;font-weight:700;cursor:pointer;transition:all .2s ease;font-family:inherit}
+.confirm-btn:active{transform:scale(0.96)}
+.confirm-btn.cancel{background:rgba(255,255,255,0.08);color:var(--text);border:1px solid var(--glass-border)}
+.confirm-btn.cancel:hover{background:rgba(255,255,255,0.12)}
+.confirm-btn.danger{background:linear-gradient(135deg,#f87171,#ef4444);color:#fff}
+.confirm-btn.danger:hover{box-shadow:0 0 24px rgba(248,113,113,0.3)}
+.confirm-btn.action{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0a0a1a}
+.confirm-btn.action:hover{box-shadow:0 0 24px rgba(110,231,183,0.3)}
 @media(min-width:600px){body{max-width:480px;margin:0 auto;padding:40px 20px 120px}.dropzone{padding:56px 20px}}
 .fade-in{animation:fadeIn .5s ease both}
 @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
@@ -446,33 +660,47 @@ body{
 <div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div>
 
 <div class="header glass fade-in">
-  <span class="logo">💧</span>
+  <span class="logo">\U0001f4a7</span>
   <h1>LiquidDrop</h1>
-  <p>Tap to send · Tap to receive</p>
+  <p>Tap to send \xb7 Tap to receive</p>
   <div class="device-badge"><span class="dot"></span> Connected on local network</div>
 </div>
 
 <div class="security-badge glass fade-in" style="animation-delay:.03s">
-  <span class="lock">""" + lock_icon + """</span>
+  <span class="lock">"""
+        + lock_icon
+        + """</span>
   <div class="security-info">
-    <strong>""" + sec_label + """</strong>
-    <span>""" + sec_detail + """</span>
+    <strong>"""
+        + sec_label
+        + """</strong>
+    <span>"""
+        + sec_detail
+        + """</span>
   </div>
 </div>
 
 <div class="qr-section glass fade-in" id="qrSection" style="animation-delay:.05s">
-  <h2>📱 Scan to open on another device</h2>
-  <div class="qr-wrap"><img src="/""" + TOKEN + """/qr.png" alt="QR Code"></div>
-  <div class="qr-url" id="urlCopy" title="Tap to copy">""" + BASE_URL + """</div>
+  <h2>\U0001f4f1 Scan to open on another device</h2>
+  <div class="qr-wrap"><img src="/"""
+        + TOKEN
+        + """/qr.png" alt="QR Code"></div>
+  <div class="qr-url" id="urlCopy" title="Tap to copy">"""
+        + BASE_URL
+        + """</div>
   <div style="margin-top:16px;padding:12px 18px;background:rgba(129,140,248,0.08);border:1px solid rgba(129,140,248,0.2);border-radius:16px">
-    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;font-weight:600">🔑 Or share this PIN code</div>
-    <div style="font-size:32px;font-weight:800;letter-spacing:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-family:'SF Mono',ui-monospace,monospace">""" + PIN_CODE + """</div>
-    <div style="font-size:11px;color:var(--text2);margin-top:4px">Enter at <span style="font-family:'SF Mono',ui-monospace,monospace">""" + f"http://{LOCAL_IP}:{PORT}" + """</span></div>
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;font-weight:600">\U0001f511 Or share this PIN code</div>
+    <div style="font-size:32px;font-weight:800;letter-spacing:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-family:'SF Mono',ui-monospace,monospace">"""
+        + PIN_CODE
+        + """</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:4px">Enter at <span style="font-family:'SF Mono',ui-monospace,monospace">"""
+        + f"http://{LOCAL_IP}:{PORT}"
+        + """</span></div>
   </div>
 </div>
 
 <div class="dropzone glass fade-in" id="dropzone" style="animation-delay:.1s">
-  <span class="drop-icon">⬆️</span>
+  <span class="drop-icon">\u2b06\ufe0f</span>
   <h2>Send Files</h2>
   <p>Tap here or drag & drop anything</p>
   <input type="file" id="fileInput" multiple>
@@ -489,13 +717,19 @@ body{
   <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
 </div>
 
-<div class="section-title" id="filesTitle" style="display:none">📁 Shared Files</div>
+<div class="section-title" id="filesTitle" style="display:none">\U0001f4c1 Shared Files</div>
+<div class="batch-toolbar glass" id="batchToolbar">
+  <label class="select-all-wrap"><input type="checkbox" class="file-checkbox" id="selectAll"> Select All</label>
+  <div class="batch-info"><strong id="selectedCount">0</strong> selected</div>
+  <button class="batch-btn dl" id="batchDownloadBtn">\u2193 Download</button>
+  <button class="batch-btn del" id="batchDeleteBtn">\u2715 Delete</button>
+</div>
 <div class="file-list" id="fileList"></div>
 <div class="toast" id="toast"></div>
 
 <div class="modal-overlay" id="zipModal">
   <div class="modal">
-    <div class="modal-icon">📦</div>
+    <div class="modal-icon">\U0001f4e6</div>
     <h3>Zip them up?</h3>
     <p>You're sending <span class="modal-count" id="modalCount">5</span> files. Want to bundle them into one clean zip?</p>
     <div class="modal-buttons">
@@ -505,66 +739,184 @@ body{
   </div>
 </div>
 
+<div class="confirm-overlay" id="confirmOverlay">
+  <div class="confirm-box">
+    <div class="confirm-icon" id="confirmIcon">\u26a0\ufe0f</div>
+    <h3 id="confirmTitle">Confirm</h3>
+    <p id="confirmMessage">Are you sure?</p>
+    <div class="confirm-buttons">
+      <button class="confirm-btn cancel" id="confirmCancel">Cancel</button>
+      <button class="confirm-btn danger" id="confirmOk">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $=s=>document.querySelector(s);
 const TOKEN=location.pathname.split('/')[1];
 const API='/'+TOKEN;
 
-$('#urlCopy').addEventListener('click',()=>{navigator.clipboard.writeText($('#urlCopy').textContent).then(()=>toast('📋 URL copied!','success')).catch(()=>{});});
+$('#urlCopy').addEventListener('click',()=>{
+  navigator.clipboard.writeText($('#urlCopy').textContent)
+    .then(()=>toast('\U0001f4cb URL copied!','success'))
+    .catch(()=>{});
+});
 
 const dz=$('#dropzone'),fi=$('#fileInput');
 dz.addEventListener('click',()=>fi.click());
-fi.addEventListener('change',()=>{if(fi.files.length)handleFiles(Array.from(fi.files));fi.value='';});
-['dragenter','dragover'].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.add('drag-over');}));
-['dragleave','drop'].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.remove('drag-over');}));
-dz.addEventListener('drop',ev=>{if(ev.dataTransfer.files.length)handleFiles(Array.from(ev.dataTransfer.files));});
+fi.addEventListener('change',()=>{
+  if(fi.files.length) handleFiles(Array.from(fi.files));
+  fi.value='';
+});
+['dragenter','dragover'].forEach(e=>dz.addEventListener(e,ev=>{
+  ev.preventDefault();dz.classList.add('drag-over');
+}));
+['dragleave','drop'].forEach(e=>dz.addEventListener(e,ev=>{
+  ev.preventDefault();dz.classList.remove('drag-over');
+}));
+dz.addEventListener('drop',ev=>{
+  if(ev.dataTransfer.files.length) handleFiles(Array.from(ev.dataTransfer.files));
+});
 
-const ZIP_THRESHOLD=3;let pendingFiles=null;
+const ZIP_THRESHOLD=3;
+let pendingFiles=null;
+
 function handleFiles(files){
-  if(files.length>=ZIP_THRESHOLD&&typeof JSZip!=='undefined'){pendingFiles=files;$('#modalCount').textContent=files.length;$('#zipModal').classList.add('show');}
-  else{uploadFiles(files);}
+  if(files.length>=ZIP_THRESHOLD && typeof JSZip!=='undefined'){
+    pendingFiles=files;
+    $('#modalCount').textContent=files.length;
+    $('#zipModal').classList.add('show');
+  } else {
+    uploadFiles(files);
+  }
 }
-$('#btnZip').addEventListener('click',async()=>{$('#zipModal').classList.remove('show');if(!pendingFiles)return;const f=pendingFiles;pendingFiles=null;await zipAndUpload(f);});
-$('#btnSeparate').addEventListener('click',()=>{$('#zipModal').classList.remove('show');if(!pendingFiles)return;const f=pendingFiles;pendingFiles=null;uploadFiles(f);});
-$('#zipModal').addEventListener('click',e=>{if(e.target===$('#zipModal')){$('#zipModal').classList.remove('show');pendingFiles=null;}});
 
-function fmtSpeed(bps){if(bps<1024)return bps.toFixed(0)+' B/s';if(bps<1048576)return(bps/1024).toFixed(0)+' KB/s';if(bps<1073741824)return(bps/1048576).toFixed(1)+' MB/s';return(bps/1073741824).toFixed(2)+' GB/s';}
+$('#btnZip').addEventListener('click',async()=>{
+  $('#zipModal').classList.remove('show');
+  if(!pendingFiles) return;
+  const f=pendingFiles; pendingFiles=null;
+  await zipAndUpload(f);
+});
+$('#btnSeparate').addEventListener('click',()=>{
+  $('#zipModal').classList.remove('show');
+  if(!pendingFiles) return;
+  const f=pendingFiles; pendingFiles=null;
+  uploadFiles(f);
+});
+$('#zipModal').addEventListener('click',e=>{
+  if(e.target===$('#zipModal')){$('#zipModal').classList.remove('show');pendingFiles=null;}
+});
+
+function fmtSpeed(bps){
+  if(bps<1024) return bps.toFixed(0)+' B/s';
+  if(bps<1048576) return(bps/1024).toFixed(0)+' KB/s';
+  if(bps<1073741824) return(bps/1048576).toFixed(1)+' MB/s';
+  return(bps/1073741824).toFixed(2)+' GB/s';
+}
 
 function sendXHR(file,displayName){
-  const bar=$('#uploadBar'),pct=$('#uploadPct'),fill=$('#progressFill'),name=$('#uploadName'),spd=$('#uploadSpeed');
-  name.textContent=displayName||file.name;pct.textContent='0%';fill.style.width='0%';spd.textContent='';bar.classList.add('active');
+  const bar=$('#uploadBar'),pct=$('#uploadPct'),fill=$('#progressFill'),
+        name=$('#uploadName'),spd=$('#uploadSpeed');
+  name.textContent=displayName||file.name;
+  pct.textContent='0%';fill.style.width='0%';spd.textContent='';
+  bar.classList.add('active');
   let lastLoaded=0,lastTime=Date.now();
   return new Promise((res,rej)=>{
-    const xhr=new XMLHttpRequest();xhr.open('POST',API+'/upload');
-    xhr.upload.onprogress=e=>{if(!e.lengthComputable)return;const p=Math.round(e.loaded/e.total*100);pct.textContent=p+'%';fill.style.width=p+'%';const now=Date.now(),dt=(now-lastTime)/1000;if(dt>=0.3){const speed=(e.loaded-lastLoaded)/dt;spd.textContent=fmtSpeed(speed);const rem=(e.total-e.loaded)/speed;if(rem>1)spd.textContent+=' · ~'+Math.ceil(rem)+'s left';lastLoaded=e.loaded;lastTime=now;}};
-    xhr.onload=()=>xhr.status===200?res():rej(new Error('HTTP '+xhr.status));xhr.onerror=()=>rej(new Error('Network error'));
+    const xhr=new XMLHttpRequest();
+    xhr.open('POST',API+'/upload');
+    xhr.upload.onprogress=e=>{
+      if(!e.lengthComputable) return;
+      const p=Math.round(e.loaded/e.total*100);
+      pct.textContent=p+'%'; fill.style.width=p+'%';
+      const now=Date.now(),dt=(now-lastTime)/1000;
+      if(dt>=0.3){
+        const speed=(e.loaded-lastLoaded)/dt;
+        spd.textContent=fmtSpeed(speed);
+        const rem=(e.total-e.loaded)/speed;
+        if(rem>1) spd.textContent+=' \xb7 ~'+Math.ceil(rem)+'s left';
+        lastLoaded=e.loaded; lastTime=now;
+      }
+    };
+    xhr.onload=()=>xhr.status===200?res():rej(new Error('HTTP '+xhr.status));
+    xhr.onerror=()=>rej(new Error('Network error'));
     const fd=new FormData();fd.append('file',file);xhr.send(fd);
   });
 }
 
-async function uploadFiles(files){for(const file of files){try{await sendXHR(file);toast('✓ '+file.name+' sent','success');}catch(e){toast('✗ '+file.name+' failed','error');}setTimeout(()=>$('#uploadBar').classList.remove('active'),800);loadFiles();}}
-
-async function zipAndUpload(files){
-  const bar=$('#uploadBar'),pct=$('#uploadPct'),fill=$('#progressFill'),name=$('#uploadName'),spd=$('#uploadSpeed');
-  name.textContent='📦 Zipping '+files.length+' files...';pct.textContent='0%';fill.style.width='0%';spd.textContent='Compressing...';bar.classList.add('active');
-  try{
-    const zip=new JSZip();
-    for(let i=0;i<files.length;i++){const buf=await files[i].arrayBuffer();zip.file(files[i].name,buf);const p=Math.round((i+1)/files.length*40);pct.textContent=p+'%';fill.style.width=p+'%';}
-    const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE',compressionOptions:{level:6}},meta=>{const p=40+Math.round(meta.percent*0.3);pct.textContent=p+'%';fill.style.width=p+'%';});
-    const ts=new Date().toISOString().slice(0,16).replace(/[:T]/g,'-');const zipName='LiquidDrop-'+ts+'.zip';const zipFile=new File([blob],zipName,{type:'application/zip'});
-    spd.textContent='Uploading...';name.textContent=zipName;pct.textContent='70%';fill.style.width='70%';
-    await sendXHR(zipFile,zipName);toast('✓ '+files.length+' files zipped & sent','success');
-  }catch(e){toast('✗ Zip failed','error');console.error(e);}
-  setTimeout(()=>bar.classList.remove('active'),800);loadFiles();
+async function uploadFiles(files){
+  for(const file of files){
+    try{
+      await sendXHR(file);
+      toast('\u2713 '+file.name+' sent','success');
+    } catch(e){
+      toast('\u2717 '+file.name+' failed','error');
+    }
+    setTimeout(()=>$('#uploadBar').classList.remove('active'),800);
+    loadFiles();
+  }
 }
 
-let lastHash='';
-async function loadFiles(){
+async function zipAndUpload(files){
+  const bar=$('#uploadBar'),pct=$('#uploadPct'),fill=$('#progressFill'),
+        name=$('#uploadName'),spd=$('#uploadSpeed');
+  name.textContent='\U0001f4e6 Zipping '+files.length+' files...';
+  pct.textContent='0%';fill.style.width='0%';spd.textContent='Compressing...';
+  bar.classList.add('active');
   try{
-    const r=await fetch(API+'/files'),files=await r.json();
-    const hash=JSON.stringify(files.map(f=>f.name+f.size+f.modified));if(hash===lastHash)return;lastHash=hash;
+    const zip=new JSZip();
+    for(let i=0;i<files.length;i++){
+      const buf=await files[i].arrayBuffer();
+      zip.file(files[i].name,buf);
+      const p=Math.round((i+1)/files.length*40);
+      pct.textContent=p+'%';fill.style.width=p+'%';
+    }
+    const blob=await zip.generateAsync(
+      {type:'blob',compression:'DEFLATE',compressionOptions:{level:6}},
+      meta=>{const p=40+Math.round(meta.percent*0.3);pct.textContent=p+'%';fill.style.width=p+'%';}
+    );
+    const ts=new Date().toISOString().slice(0,16).replace(/[:T]/g,'-');
+    const zipName='LiquidDrop-'+ts+'.zip';
+    const zipFile=new File([blob],zipName,{type:'application/zip'});
+    spd.textContent='Uploading...';name.textContent=zipName;
+    pct.textContent='70%';fill.style.width='70%';
+    await sendXHR(zipFile,zipName);
+    toast('\u2713 '+files.length+' files zipped & sent','success');
+  } catch(e){
+    toast('\u2717 Zip failed','error');console.error(e);
+  }
+  setTimeout(()=>bar.classList.remove('active'),800);
+  loadFiles();
+}
+
+/* ===== File list with selection state preserved across refreshes ===== */
+let lastHash='',selectedFiles=new Set();
+let isBusy=false;  /* guard to prevent loadFiles from clobbering mid-action */
+
+async function loadFiles(){
+  if(isBusy) return;  /* skip refresh while batch action is in progress */
+  try{
+    const r=await fetch(API+'/files');
+    if(!r.ok) return;
+    const files=await r.json();
+    const hash=JSON.stringify(files.map(f=>f.name+f.size+f.modified));
+    if(hash===lastHash) return;
+    lastHash=hash;
+
     const list=$('#fileList'),title=$('#filesTitle');
-    if(!files.length){title.style.display='none';list.innerHTML='<div class="empty-state"><span>🌊</span>No files yet — drop something!</div>';return;}
+
+    /* Prune selected names that no longer exist on disk */
+    const existingNames=new Set(files.map(f=>f.name));
+    for(const n of [...selectedFiles]){
+      if(!existingNames.has(n)) selectedFiles.delete(n);
+    }
+
+    if(!files.length){
+      title.style.display='none';
+      selectedFiles.clear();
+      list.innerHTML='<div class="empty-state"><span>\U0001f30a</span>No files yet \u2014 drop something!</div>';
+      updateBatchUI();
+      return;
+    }
     title.style.display='block';
     list.innerHTML=files.map((f,i)=>{
       const ext=f.name.split('.').pop().toLowerCase();
@@ -572,39 +924,241 @@ async function loadFiles(){
       const isVid=['mp4','mov','avi','mkv','webm','m4v'].includes(ext);
       const isDoc=['pdf','doc','docx','txt','xls','xlsx','ppt','pptx','csv','md'].includes(ext);
       const ic=isImg?'img-type':isVid?'vid-type':isDoc?'doc-type':'';
-      const em=isImg?'🖼️':isVid?'🎬':isDoc?'📄':'📦';
-      return `<a class="file-card glass" href="${API}/download/${encodeURIComponent(f.name)}" style="animation-delay:${i*0.06}s" download>
-        <div class="file-icon ${ic}">${em}</div>
-        <div class="file-meta"><div class="file-name">${esc(f.name)}</div><div class="file-detail">${fmtSize(f.size)} · ${fmtTime(f.modified)}</div></div>
-        <button class="file-delete" onclick="event.preventDefault();event.stopPropagation();delFile('${esc(f.name)}')" title="Delete">✕</button>
-        <span class="file-dl">↓</span></a>`;
+      const em=isImg?'\U0001f5bc\ufe0f':isVid?'\U0001f3ac':isDoc?'\U0001f4c4':'\U0001f4e6';
+      const checked=selectedFiles.has(f.name)?'checked':'';
+      const dn=f.name.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      return '<div class="file-card glass" style="animation-delay:'+i*0.06+'s">'+
+        '<input type="checkbox" class="file-checkbox file-select" data-name="'+dn+'" '+checked+'>'+
+        '<div class="file-icon '+ic+'">'+em+'</div>'+
+        '<div class="file-meta"><div class="file-name">'+esc(f.name)+'</div><div class="file-detail">'+fmtSize(f.size)+' \xb7 '+fmtTime(f.modified)+'</div></div>'+
+        '<button class="file-delete" data-name="'+dn+'" title="Delete">\u2715</button>'+
+        '<a href="'+API+'/download/'+encodeURIComponent(f.name)+'" download class="file-dl" title="Download">\u2193</a></div>';
     }).join('');
-  }catch(e){}
+    updateBatchUI();
+  } catch(e){/* network hiccup \u2014 silently retry next interval */}
 }
 
-async function delFile(n){if(!confirm('Delete '+n+'?'))return;await fetch(API+'/delete/'+encodeURIComponent(n),{method:'DELETE'});toast('🗑️ Deleted','success');loadFiles();}
-function fmtSize(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';if(b<1073741824)return(b/1048576).toFixed(1)+' MB';return(b/1073741824).toFixed(2)+' GB';}
-function fmtTime(t){const d=new Date(t*1000),diff=(Date.now()-d)/1000;if(diff<60)return'Just now';if(diff<3600)return Math.floor(diff/60)+'m ago';if(diff<86400)return Math.floor(diff/3600)+'h ago';return d.toLocaleDateString();}
+/* ===== Event delegation for the file list ===== */
+$('#fileList').addEventListener('click',e=>{
+  /* Delete button */
+  const del=e.target.closest('.file-delete');
+  if(del){
+    e.preventDefault();e.stopPropagation();
+    const n=del.dataset.name;
+    showConfirm('\U0001f5d1\ufe0f','Delete File','Delete <strong>'+esc(n)+'</strong>?<br>This cannot be undone.','Delete','danger',()=>{
+      fetch(API+'/delete/'+encodeURIComponent(n),{method:'DELETE'})
+        .then(()=>{toast('\U0001f5d1\ufe0f Deleted','success');selectedFiles.delete(n);lastHash='';loadFiles();})
+        .catch(()=>toast('\u2717 Delete failed','error'));
+    });
+    return;
+  }
+  /* Checkbox toggle */
+  const cb=e.target.closest('.file-select');
+  if(cb){
+    if(cb.checked) selectedFiles.add(cb.dataset.name);
+    else selectedFiles.delete(cb.dataset.name);
+    updateBatchUI();
+    return;
+  }
+});
+
+$('#selectAll').addEventListener('change',e=>{
+  document.querySelectorAll('.file-select').forEach(cb=>{
+    cb.checked=e.target.checked;
+    if(e.target.checked) selectedFiles.add(cb.dataset.name);
+    else selectedFiles.delete(cb.dataset.name);
+  });
+  updateBatchUI();
+});
+
+function updateBatchUI(){
+  const boxes=document.querySelectorAll('.file-select');
+  const count=selectedFiles.size;
+  $('#selectedCount').textContent=count;
+
+  if(boxes.length>0){
+    $('#batchToolbar').classList.add('show');
+  } else {
+    $('#batchToolbar').classList.remove('show');
+  }
+
+  /* Sync the "Select All" checkbox — supports indeterminate state */
+  const sa=$('#selectAll');
+  sa.checked = boxes.length>0 && count===boxes.length;
+  sa.indeterminate = count>0 && count<boxes.length;
+
+  const hasSelection = count>0;
+  ['#batchDeleteBtn','#batchDownloadBtn'].forEach(s=>{
+    $(s).style.opacity=hasSelection?'1':'0.3';
+    $(s).style.pointerEvents=hasSelection?'auto':'none';
+  });
+}
+
+/* ===== Batch delete ===== */
+$('#batchDeleteBtn').addEventListener('click',()=>{
+  if(!selectedFiles.size) return;
+  const c=selectedFiles.size;
+  showConfirm(
+    '\u26a0\ufe0f',
+    'Delete '+c+' File'+(c>1?'s':''),
+    'Are you sure you want to delete <strong>'+c+'</strong> file'+(c>1?'s':'')+'?<br>This cannot be undone.',
+    'Delete All','danger',
+    async()=>{
+      isBusy=true;
+      const names=[...selectedFiles];
+      let ok=0;
+      for(const n of names){
+        try{
+          await fetch(API+'/delete/'+encodeURIComponent(n),{method:'DELETE'});
+          ok++;
+        } catch(e){}
+      }
+      selectedFiles.clear();
+      isBusy=false;
+      lastHash='';
+      loadFiles();
+      toast('\U0001f5d1\ufe0f Deleted '+ok+' file'+(ok!==1?'s':''),'success');
+    }
+  );
+});
+
+/* ===== Batch download — intentionally preserves selection afterward ===== */
+$('#batchDownloadBtn').addEventListener('click',()=>{
+  if(!selectedFiles.size) return;
+  const c=selectedFiles.size;
+  showConfirm(
+    '\U0001f4e5',
+    'Download '+c+' File'+(c>1?'s':''),
+    'Download <strong>'+c+'</strong> selected file'+(c>1?'s':'')+'?',
+    'Download','action',
+    async()=>{
+      if(typeof JSZip!=='undefined'){
+        const bar=$('#uploadBar'),pct=$('#uploadPct'),fill=$('#progressFill'),
+              uname=$('#uploadName'),spd=$('#uploadSpeed');
+        uname.textContent='\U0001f4e6 Zipping '+c+' files...';
+        pct.textContent='0%';fill.style.width='0%';spd.textContent='Downloading...';
+        bar.classList.add('active');
+        isBusy=true;
+        try{
+          const zip=new JSZip();
+          const names=[...selectedFiles];
+          for(let i=0;i<names.length;i++){
+            const resp=await fetch(API+'/download/'+encodeURIComponent(names[i]));
+            if(!resp.ok) throw new Error('Failed to fetch '+names[i]);
+            const blob=await resp.blob();
+            zip.file(names[i],blob);
+            const p=Math.round((i+1)/names.length*70);
+            pct.textContent=p+'%';fill.style.width=p+'%';
+          }
+          spd.textContent='Compressing...';
+          const blob=await zip.generateAsync(
+            {type:'blob',compression:'DEFLATE',compressionOptions:{level:6}},
+            meta=>{const p=70+Math.round(meta.percent*0.3);pct.textContent=p+'%';fill.style.width=p+'%';}
+          );
+          const ts=new Date().toISOString().slice(0,16).replace(/[:T]/g,'-');
+          const a=document.createElement('a');
+          a.href=URL.createObjectURL(blob);
+          a.download='LiquidDrop-'+ts+'.zip';
+          document.body.appendChild(a);a.click();a.remove();
+          /* Revoke after delay so browser can start the download */
+          setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+          toast('\u2713 Downloaded '+c+' files as zip','success');
+        } catch(e){
+          toast('\u2717 Download failed','error');console.error(e);
+        }
+        isBusy=false;
+        setTimeout(()=>bar.classList.remove('active'),800);
+        /* Selection is intentionally preserved so the user can still
+           click Delete to remove the same batch after downloading. */
+      } else {
+        /* Fallback: trigger individual downloads */
+        const names=[...selectedFiles];
+        for(const n of names){
+          const a=document.createElement('a');
+          a.href=API+'/download/'+encodeURIComponent(n);
+          a.download='';
+          document.body.appendChild(a);a.click();a.remove();
+          await new Promise(r=>setTimeout(r,300));
+        }
+        toast('\u2713 Downloaded '+c+' file'+(c>1?'s':''),'success');
+      }
+    }
+  );
+});
+
+/* ===== Confirm dialog ===== */
+let confirmCb=null;
+function showConfirm(icon,title,msg,okText,okClass,cb){
+  $('#confirmIcon').textContent=icon;
+  $('#confirmTitle').textContent=title;
+  $('#confirmMessage').innerHTML=msg;
+  const ok=$('#confirmOk');
+  ok.textContent=okText;
+  ok.className='confirm-btn '+okClass;
+  confirmCb=cb;
+  $('#confirmOverlay').classList.add('show');
+}
+$('#confirmCancel').addEventListener('click',()=>{
+  $('#confirmOverlay').classList.remove('show');confirmCb=null;
+});
+$('#confirmOk').addEventListener('click',()=>{
+  $('#confirmOverlay').classList.remove('show');
+  if(confirmCb){const fn=confirmCb;confirmCb=null;fn();}
+});
+$('#confirmOverlay').addEventListener('click',e=>{
+  if(e.target===$('#confirmOverlay')){$('#confirmOverlay').classList.remove('show');confirmCb=null;}
+});
+
+/* ===== Utility ===== */
+function fmtSize(b){
+  if(b<1024) return b+' B';
+  if(b<1048576) return(b/1024).toFixed(1)+' KB';
+  if(b<1073741824) return(b/1048576).toFixed(1)+' MB';
+  return(b/1073741824).toFixed(2)+' GB';
+}
+function fmtTime(t){
+  const d=new Date(t*1000),diff=(Date.now()-d)/1000;
+  if(diff<60) return 'Just now';
+  if(diff<3600) return Math.floor(diff/60)+'m ago';
+  if(diff<86400) return Math.floor(diff/3600)+'h ago';
+  return d.toLocaleDateString();
+}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
-function toast(m,t='success'){const e=$('#toast');e.textContent=m;e.className='toast '+t+' show';clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),2500);}
-loadFiles();setInterval(loadFiles,3000);
+function toast(m,t='success'){
+  const e=$('#toast');e.textContent=m;
+  e.className='toast '+t+' show';
+  clearTimeout(e._t);
+  e._t=setTimeout(()=>e.classList.remove('show'),2500);
+}
+
+loadFiles();
+setInterval(loadFiles,3000);
 </script>
 </body>
 </html>"""
+    )
 
 
 # ── PIN Entry Page ────────────────────────────────────────────────────────
 
-def build_pin_page(error=False):
-    err_html = '<div style="color:#f472b6;font-size:13px;margin-top:12px;font-weight:600">Wrong PIN. Try again.</div>' if error else ''
-    return """<!DOCTYPE html>
+
+def build_pin_page(error=False, locked=False):
+    if locked:
+        err_html = '<div style="color:#f472b6;font-size:13px;margin-top:12px;font-weight:600">Too many attempts. Try again in 60 seconds.</div>'
+    elif error:
+        err_html = '<div style="color:#f472b6;font-size:13px;margin-top:12px;font-weight:600">Wrong PIN. Try again.</div>'
+    else:
+        err_html = ""
+
+    return (
+        """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>LiquidDrop — Enter PIN</title>
+<title>LiquidDrop \u2014 Enter PIN</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{--bg:#0a0a1a;--glass:rgba(255,255,255,0.06);--glass-border:rgba(255,255,255,0.12);--accent:#6ee7b7;--accent2:#818cf8;--accent3:#f472b6;--text:#f0f0f5;--text2:rgba(255,255,255,0.55);--radius:24px;--safe-top:env(safe-area-inset-top,20px);--safe-bottom:env(safe-area-inset-bottom,20px)}
@@ -639,12 +1193,22 @@ h1{font-size:28px;font-weight:700;background:linear-gradient(135deg,var(--accent
   <p class="subtitle">Enter the 4-digit PIN to connect</p>
   <form method="POST" action="/pin" id="pinForm">
     <div class="pin-row">
-      <input class="pin-box""" + (' error' if error else '') + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d1" id="d1" autofocus autocomplete="off">
-      <input class="pin-box""" + (' error' if error else '') + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d2" id="d2" autocomplete="off">
-      <input class="pin-box""" + (' error' if error else '') + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d3" id="d3" autocomplete="off">
-      <input class="pin-box""" + (' error' if error else '') + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d4" id="d4" autocomplete="off">
+      <input class="pin-box"""
+        + (" error" if error else "")
+        + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d1" id="d1" autofocus autocomplete="off">
+      <input class="pin-box"""
+        + (" error" if error else "")
+        + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d2" id="d2" autocomplete="off">
+      <input class="pin-box"""
+        + (" error" if error else "")
+        + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d3" id="d3" autocomplete="off">
+      <input class="pin-box"""
+        + (" error" if error else "")
+        + """" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d4" id="d4" autocomplete="off">
     </div>
-    """ + err_html + """
+    """
+        + err_html
+        + """
     <button type="submit" class="submit-btn">\U0001f4a7 Connect</button>
   </form>
 </div>
@@ -653,155 +1217,271 @@ const boxes=document.querySelectorAll('.pin-box');
 boxes.forEach((b,i)=>{
   b.addEventListener('input',e=>{
     b.value=b.value.replace(/[^0-9]/g,'');
-    if(b.value&&i<3)boxes[i+1].focus();
-    if([...boxes].every(x=>x.value))document.getElementById('pinForm').submit();
+    if(b.value && i<3) boxes[i+1].focus();
+    if([...boxes].every(x=>x.value)) document.getElementById('pinForm').submit();
   });
   b.addEventListener('keydown',e=>{
-    if(e.key==='Backspace'&&!b.value&&i>0){boxes[i-1].focus();boxes[i-1].value='';}
+    if(e.key==='Backspace' && !b.value && i>0){boxes[i-1].focus();boxes[i-1].value='';}
   });
   b.addEventListener('paste',e=>{
     e.preventDefault();
     const p=(e.clipboardData||window.clipboardData).getData('text').replace(/[^0-9]/g,'');
     for(let j=0;j<4&&j<p.length;j++){boxes[j].value=p[j];}
-    if(p.length>=4)document.getElementById('pinForm').submit();
+    if(p.length>=4) document.getElementById('pinForm').submit();
   });
 });
 </script>
 </body>
 </html>"""
+    )
 
 
 # ── Server ───────────────────────────────────────────────────────────────
 
+
 class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "LiquidDrop/3.1"
+    sys_version = ""  # Hide Python version from Server header
+
     def log_message(self, fmt, *args):
-        ts = datetime.now().strftime("%H:%M:%S"); msg = fmt % args
-        if "200" in msg or "301" in msg: print(f"  \033[90m{ts}\033[0m  \033[32m{msg}\033[0m")
-        elif "404" in msg or "403" in msg: print(f"  \033[90m{ts}\033[0m  \033[33m{msg}\033[0m")
-        else: print(f"  \033[90m{ts}\033[0m  {msg}")
+        ts = datetime.now().strftime("%H:%M:%S")
+        msg = fmt % args
+        if "200" in msg or "301" in msg or "302" in msg:
+            print(f"  \033[90m{ts}\033[0m  \033[32m{msg}\033[0m")
+        elif "404" in msg or "403" in msg:
+            print(f"  \033[90m{ts}\033[0m  \033[33m{msg}\033[0m")
+        else:
+            print(f"  \033[90m{ts}\033[0m  {msg}")
+
+    def _client_ip(self):
+        return self.client_address[0]
 
     def _is_authed(self):
         """Check if the request path starts with the correct token."""
-        parts = self.path.strip('/').split('/')
+        parts = self.path.strip("/").split("/")
         return parts and parts[0] == TOKEN
 
+    def _send_json(self, data, status=200):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, html, status=200):
+        body = html.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
-        path_stripped = self.path.strip('/')
-        parts = path_stripped.split('/', 2)
+        path_stripped = self.path.strip("/")
+        # Strip query strings for routing
+        if "?" in path_stripped:
+            path_stripped = path_stripped.split("?", 1)[0]
+        parts = path_stripped.split("/", 2)
 
         # ── Unauthenticated routes (PIN entry page) ──
         if not parts[0] or parts[0] != TOKEN:
-            # Root URL or unknown path → show PIN entry page
-            if path_stripped == '' or path_stripped == 'pin':
-                html = build_pin_page()
-                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Cache-Control', 'no-cache'); self.end_headers()
-                self.wfile.write(html.encode())
+            if path_stripped == "" or path_stripped == "pin":
+                locked = _check_pin_rate_limit(self._client_ip())
+                self._send_html(build_pin_page(locked=locked))
             else:
                 self.send_error(403, "Forbidden")
             return
 
         # ── Authenticated routes (token prefix valid) ──
-        route = parts[1] if len(parts) > 1 else ''
+        route = parts[1] if len(parts) > 1 else ""
 
-        if route == '' or route == 'index.html':
-            html = build_html_page()
-            self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Cache-Control', 'no-cache'); self.end_headers()
-            self.wfile.write(html.encode())
+        if route == "" or route == "index.html":
+            self._send_html(build_html_page())
 
-        elif route == 'qr.png':
+        elif route == "qr.png":
             if QR_PNG_BYTES:
-                self.send_response(200); self.send_header('Content-Type', 'image/png'); self.send_header('Content-Length', str(len(QR_PNG_BYTES))); self.send_header('Cache-Control', 'public, max-age=3600'); self.end_headers()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(QR_PNG_BYTES)))
+                self.send_header("Cache-Control", "public, max-age=3600")
+                self.end_headers()
                 self.wfile.write(QR_PNG_BYTES)
-            else: self.send_error(404)
+            else:
+                self.send_error(404)
 
-        elif route == 'files':
+        elif route == "files":
             files = []
-            for f in sorted(Path(UPLOAD_DIR).iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-                if f.is_file() and not f.name.startswith('.'):
-                    s = f.stat(); files.append({"name": f.name, "size": s.st_size, "modified": s.st_mtime})
-            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
-            self.wfile.write(json.dumps(files).encode())
+            try:
+                for f in sorted(
+                    Path(UPLOAD_DIR).iterdir(),
+                    key=lambda x: x.stat().st_mtime,
+                    reverse=True,
+                ):
+                    if f.is_file() and not f.name.startswith("."):
+                        s = f.stat()
+                        files.append(
+                            {
+                                "name": f.name,
+                                "size": s.st_size,
+                                "modified": s.st_mtime,
+                            }
+                        )
+            except OSError:
+                pass
+            self._send_json(files)
 
-        elif route == 'download' and len(parts) > 2:
-            fname = urllib.parse.unquote(parts[2]); fpath = Path(UPLOAD_DIR) / fname
-            if not fpath.resolve().parent == Path(UPLOAD_DIR).resolve() or not fpath.is_file(): self.send_error(404); return
-            fsize = fpath.stat().st_size; mime = mimetypes.guess_type(fname)[0] or 'application/octet-stream'
-            self.send_response(200); self.send_header('Content-Type', mime); self.send_header('Content-Length', str(fsize))
-            self.send_header('Content-Disposition', f'attachment; filename="{fname}"'); self.end_headers()
-            with open(fpath, 'rb') as f:
-                while True:
-                    chunk = f.read(CHUNK)
-                    if not chunk: break
-                    self.wfile.write(chunk)
-        else: self.send_error(404)
+        elif route == "download" and len(parts) > 2:
+            fname = urllib.parse.unquote(parts[2])
+            fpath = _safe_path(fname)
+            if fpath is None:
+                self.send_error(404)
+                return
+            fsize = fpath.stat().st_size
+            mime = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(fsize))
+            safe_fname = fname.replace('"', '\\"')
+            self.send_header(
+                "Content-Disposition", f'attachment; filename="{safe_fname}"'
+            )
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            try:
+                with open(fpath, "rb") as f:
+                    while True:
+                        chunk = f.read(CHUNK)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # Client disconnected mid-download
+        else:
+            self.send_error(404)
 
     def do_POST(self):
-        path_stripped = self.path.strip('/')
+        path_stripped = self.path.strip("/")
 
         # ── Unauthenticated POST: PIN verification ──
-        if path_stripped == 'pin':
-            cl = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(cl).decode('utf-8', errors='replace')
+        if path_stripped == "pin":
+            ip = self._client_ip()
+
+            # Rate limit check
+            if _check_pin_rate_limit(ip):
+                self._send_html(build_pin_page(locked=True))
+                print(f"  \033[31m\U0001f511 PIN locked out for {ip}\033[0m")
+                return
+
+            cl = int(self.headers.get("Content-Length", 0))
+            if cl > 1024:  # Reject absurdly large POST bodies
+                self.send_error(400)
+                return
+            body = self.rfile.read(cl).decode("utf-8", errors="replace")
             params = urllib.parse.parse_qs(body)
-            entered = ''.join([params.get(f'd{i}', [''])[0] for i in range(1, 5)])
+            # Only take first character per digit field to prevent injection
+            entered = "".join(
+                [params.get(f"d{i}", [""])[0][:1] for i in range(1, 5)]
+            )
+
             if entered == PIN_CODE:
-                # Correct PIN → redirect to the full token URL
+                _clear_pin_fails(ip)
                 self.send_response(302)
-                self.send_header('Location', f'/{TOKEN}/')
+                self.send_header("Location", f"/{TOKEN}/")
                 self.end_headers()
-                print(f"  \033[32m🔑 PIN accepted — device connected\033[0m")
+                print(f"  \033[32m\U0001f511 PIN accepted \u2014 device connected\033[0m")
             else:
-                # Wrong PIN → show error page
-                html = build_pin_page(error=True)
-                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
-                self.wfile.write(html.encode())
-                print(f"  \033[33m🔑 Wrong PIN attempt\033[0m")
+                _record_pin_fail(ip)
+                locked = _check_pin_rate_limit(ip)
+                self._send_html(build_pin_page(error=True, locked=locked))
+                print(f"  \033[33m\U0001f511 Wrong PIN attempt from {ip}\033[0m")
             return
 
         # ── Authenticated POST routes ──
         if not self._is_authed():
-            self.send_error(403, "Forbidden"); return
-        parts = self.path.strip('/').split('/'); route = parts[1] if len(parts) > 1 else ''
-        if route == 'upload':
-            ct = self.headers.get('Content-Type', '')
-            if 'multipart/form-data' not in ct: self.send_error(400); return
-            boundary = ct.split('boundary=')[1]
-            if ';' in boundary: boundary = boundary.split(';')[0]
+            self.send_error(403, "Forbidden")
+            return
+        parts = self.path.strip("/").split("/")
+        route = parts[1] if len(parts) > 1 else ""
+
+        if route == "upload":
+            ct = self.headers.get("Content-Type", "")
+            if "multipart/form-data" not in ct:
+                self.send_error(400)
+                return
+            try:
+                boundary = ct.split("boundary=")[1]
+            except IndexError:
+                self.send_error(400)
+                return
+            if ";" in boundary:
+                boundary = boundary.split(";")[0]
             boundary = boundary.strip().encode()
-            cl = int(self.headers.get('Content-Length', 0))
-            parser = StreamingMultipartParser(self.rfile, boundary, cl); count = 0
+            cl = int(self.headers.get("Content-Length", 0))
+
+            parser = StreamingMultipartParser(self.rfile, boundary, cl)
+            count = 0
             for filename, dest, written in parser.parse():
                 count += 1
-                sz = f"{written/(1024*1024):.1f} MB" if written > 1048576 else f"{written/1024:.1f} KB" if written > 1024 else f"{written} B"
-                print(f"  \033[36m⬆  Received:\033[0m {dest.name} ({sz})")
-            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "count": count}).encode())
-        else: self.send_error(404)
+                if written > 1048576:
+                    sz = f"{written / (1024 * 1024):.1f} MB"
+                elif written > 1024:
+                    sz = f"{written / 1024:.1f} KB"
+                else:
+                    sz = f"{written} B"
+                print(f"  \033[36m\u2b06  Received:\033[0m {dest.name} ({sz})")
+            self._send_json({"status": "ok", "count": count})
+        else:
+            self.send_error(404)
 
     def do_DELETE(self):
         if not self._is_authed():
-            self.send_error(403, "Forbidden"); return
-        parts = self.path.strip('/').split('/', 2); route = parts[1] if len(parts) > 1 else ''
-        if route == 'delete' and len(parts) > 2:
-            fname = urllib.parse.unquote(parts[2]); fpath = Path(UPLOAD_DIR) / fname
-            if fpath.resolve().parent == Path(UPLOAD_DIR).resolve() and fpath.is_file():
-                fpath.unlink(); print(f"  \033[31m🗑  Deleted:\033[0m {fname}")
-            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
-            self.wfile.write(b'{"status":"ok"}')
-        else: self.send_error(404)
+            self.send_error(403, "Forbidden")
+            return
+        parts = self.path.strip("/").split("/", 2)
+        route = parts[1] if len(parts) > 1 else ""
+        if route == "delete" and len(parts) > 2:
+            fname = urllib.parse.unquote(parts[2])
+            fpath = _safe_path(fname)
+            if fpath is not None:
+                try:
+                    fpath.unlink()
+                    print(f"  \033[31m\U0001f5d1  Deleted:\033[0m {fname}")
+                except OSError as e:
+                    print(f"  \033[31m\U0001f5d1  Delete failed:\033[0m {fname} ({e})")
+            self._send_json({"status": "ok"})
+        else:
+            self.send_error(404)
 
 
 class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    allow_reuse_address = True; request_queue_size = 32; daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 32
+    daemon_threads = True
 
 
 def main():
     global BASE_URL, SECURE, TOKEN, PIN_CODE, PORT
 
-    parser = argparse.ArgumentParser(description="💧 LiquidDrop — Local File Transfer")
-    parser.add_argument("--secure", action="store_true", help="Enable HTTPS with self-signed TLS certificate")
-    parser.add_argument("--port", type=int, default=PORT, help=f"Port number (default: {PORT})")
-    parser.add_argument("--new-token", action="store_true", help="Generate a new token (invalidates old bookmarks)")
+    parser = argparse.ArgumentParser(
+        description="\U0001f4a7 LiquidDrop \u2014 Local File Transfer"
+    )
+    parser.add_argument(
+        "--secure",
+        action="store_true",
+        help="Enable HTTPS with self-signed TLS certificate",
+    )
+    parser.add_argument(
+        "--port", type=int, default=PORT, help=f"Port number (default: {PORT})"
+    )
+    parser.add_argument(
+        "--new-token",
+        action="store_true",
+        help="Generate a new token (invalidates old bookmarks)",
+    )
     args = parser.parse_args()
     SECURE = args.secure
     port = args.port
@@ -812,33 +1492,33 @@ def main():
 
     PIN_CODE = generate_pin(TOKEN)
 
-    os.system('cls' if os.name == 'nt' else 'clear')
+    os.system("cls" if os.name == "nt" else "clear")
     print()
 
     if SECURE:
-        print("  \033[1;96m💧 LiquidDrop v3.0 — Secure Mode (HTTPS)\033[0m")
-        print("  \033[90m" + "─"*50 + "\033[0m\n")
+        print("  \033[1;96m\U0001f4a7 LiquidDrop v3.1 \u2014 Secure Mode (HTTPS)\033[0m")
+        print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
         generate_certificate()
         BASE_URL = f"https://{LOCAL_IP}:{port}/{TOKEN}"
     else:
-        print("  \033[1;96m💧 LiquidDrop v3.0\033[0m")
-        print("  \033[90m" + "─"*50 + "\033[0m\n")
+        print("  \033[1;96m\U0001f4a7 LiquidDrop v3.1\033[0m")
+        print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
         BASE_URL = f"http://{LOCAL_IP}:{port}/{TOKEN}"
 
-    print("  \033[33m📷 Generating QR code...\033[0m")
+    print("  \033[33m\U0001f4f7 Generating QR code...\033[0m")
     qr = generate_qr()
 
-    os.system('cls' if os.name == 'nt' else 'clear')
+    os.system("cls" if os.name == "nt" else "clear")
     print()
     if SECURE:
-        print("  \033[1;96m💧 LiquidDrop v3.0 — Secure Mode (HTTPS)\033[0m")
+        print("  \033[1;96m\U0001f4a7 LiquidDrop v3.1 \u2014 Secure Mode (HTTPS)\033[0m")
     else:
-        print("  \033[1;96m💧 LiquidDrop v3.0\033[0m")
-    print("  \033[90m" + "─"*50 + "\033[0m\n")
+        print("  \033[1;96m\U0001f4a7 LiquidDrop v3.1\033[0m")
+    print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
     print_terminal_qr(qr)
     print()
-    print("  \033[90m" + "─"*50 + "\033[0m")
-    print(f"  \033[1;97m📱 Scan the QR or open:\033[0m")
+    print("  \033[90m" + "\u2500" * 50 + "\033[0m")
+    print(f"  \033[1;97m\U0001f4f1 Scan the QR or open:\033[0m")
     print(f"  \033[1;92m   {BASE_URL}\033[0m\n")
 
     protocol = "https" if SECURE else "http"
@@ -847,18 +1527,22 @@ def main():
     print(f"  \033[90m   at {pin_url}\033[0m\n")
 
     if SECURE:
-        print(f"  \033[1;32m🔒 HTTPS Enabled — TLS Encrypted\033[0m")
+        print(f"  \033[1;32m\U0001f512 HTTPS Enabled \u2014 TLS Encrypted\033[0m")
         print(f"  \033[90m   Fingerprint: {CERT_FINGERPRINT[:48]}\033[0m")
         print(f"  \033[90m   {CERT_FINGERPRINT[48:]}\033[0m\n")
-        print(f"  \033[33m   ⚠  First visit: tap Advanced → Proceed\033[0m\n")
+        print(f"  \033[33m   \u26a0  First visit: tap Advanced \u2192 Proceed\033[0m\n")
     else:
-        print(f"  \033[1;32m🌐 Protected by secret token + WiFi encryption\033[0m")
-        print(f"  \033[90m   Add --secure for full HTTPS/TLS encryption\033[0m\n")
+        print(f"  \033[1;32m\U0001f310 Protected by secret token + WiFi encryption\033[0m")
+        print(
+            f"  \033[90m   Add --secure for full HTTPS/TLS encryption\033[0m\n"
+        )
 
-    print(f"  \033[90mFiles: ~/LiquidDrop  ·  Streaming 256KB chunks\033[0m")
-    print(f"  \033[90mURL is stable — bookmarks & home screen shortcuts persist\033[0m")
+    print(f"  \033[90mFiles: ~/LiquidDrop  \xb7  Streaming 256KB chunks\033[0m")
+    print(
+        f"  \033[90mURL is stable \u2014 bookmarks & home screen shortcuts persist\033[0m"
+    )
     print(f"  \033[90mPress Ctrl+C to stop\033[0m")
-    print("  \033[90m" + "─"*50 + "\033[0m\n")
+    print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
 
     with ThreadedServer(("0.0.0.0", port), Handler) as httpd:
         if SECURE:
@@ -868,11 +1552,17 @@ def main():
             httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
 
         def shutdown(sig, frame):
-            print("\n  \033[33m⏹  Shutting down...\033[0m\n"); httpd.shutdown(); sys.exit(0)
+            print("\n  \033[33m\u23f9  Shutting down...\033[0m\n")
+            # shutdown() must be called from a different thread than serve_forever()
+            threading.Thread(target=httpd.shutdown, daemon=True).start()
+
         signal.signal(signal.SIGINT, shutdown)
         threading.Timer(0.5, lambda: webbrowser.open(BASE_URL)).start()
-        print(f"  \033[90m🌐 Opening browser...\033[0m\n")
-        httpd.serve_forever()
+        print(f"  \033[90m\U0001f310 Opening browser...\033[0m\n")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":
