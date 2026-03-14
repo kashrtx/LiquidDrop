@@ -53,7 +53,7 @@ python3 liquiddrop.py --secure     # HTTPS mode, full TLS encryption
 python3 liquiddrop.py --port 8888  # custom port
 python3 liquiddrop.py --new-token  # regenerate URL (invalidates old bookmarks)
 ```
-Or open `Run LiquidDrop.bat` on Windows.
+Or open `Run_LiquidDrop` on your specific operating system (macOS, Windows, Linux) for quick run in standard mode.
 
 
 
