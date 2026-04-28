@@ -15,14 +15,20 @@
 
 One Python file. No accounts. No cloud. No install on the receiving device. Run it, scan the QR (or enter the PIN), transfer files.
 
-## Screenshots
+## Demo Screenshots
 
 <p align="center">
-  <img src="assets/readme/host.png" alt="LiquidDrop desktop host view" width="78%">
+  <img src="https://github.com/user-attachments/assets/aa3bd22d-b983-4443-8324-5eda9e7235d5" alt="LiquidDrop desktop host view" width="78%">
+  <br>
+  <em>The Desktop Host View</em>
+  <br>
 </p>
 
 <p align="center">
-  <img src="assets/readme/phone.png" alt="LiquidDrop mobile view" width="32%">
+  <img src="https://github.com/user-attachments/assets/385b8aaa-ea5d-4802-afba-ba23b1ce65f9" alt="LiquidDrop mobile view" width="32%">
+  <br>
+  <em>The Mobile View (scrolled down)</em>
+  <br>
 </p>
 
 ## Why
@@ -155,7 +161,7 @@ liquiddrop/
 └── LICENSE
 ```
 
-The app code is still one file. That's the point.
+The app code is just one file. That's the point.
 
 ## License
 
