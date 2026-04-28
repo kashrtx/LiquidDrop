@@ -22,11 +22,14 @@ Every other file transfer tool wants you to install an app on both devices. Liqu
 ## Features
 
 - Single command to start, browser opens automatically
+- Single-instance protection — a second launch reopens the existing host session instead of starting a duplicate server
 - QR code in your terminal and in the web UI
 - **PIN code join** — 4-digit PIN as a fallback when QR scanning isn't convenient
 - **Stable URLs** — bookmarks and iPhone home screen shortcuts survive server restarts
 - Works both ways: phone to desktop, desktop to phone
 - Drag and drop on desktop, tap to pick on mobile
+- **Host stop control** — the desktop host view includes a clear stop button to shut down the session without using the terminal
+- **Desktop-optimized layout** — wide screens use a cleaner multi-panel layout while the phone view stays unchanged
 - 3+ files? Offers to zip them into one bundle
 - Live upload speed and ETA
 - Streams files in 256KB chunks, so a 10GB file uses the same memory as a 10KB file

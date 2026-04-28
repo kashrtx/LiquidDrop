@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════╗
-║          💧 LiquidDrop v3.1                  ║
+║          💧 LiquidDrop v3.2                  ║
 ║   Beautiful Local File Transfer              ║
 ║                                              ║
 ║   python3 liquiddrop.py              (HTTP)  ║
@@ -12,18 +12,23 @@
 """
 
 import http.server, socketserver, os, sys, socket, json, secrets
-import urllib.parse, mimetypes, shutil, signal, subprocess, io
+import urllib.parse, mimetypes, shutil, signal, subprocess, io, atexit
 import webbrowser, threading, ssl, hashlib, argparse, time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
+APP_VERSION = "3.2"
 PORT = 7777
 UPLOAD_DIR = os.path.join(os.path.expanduser("~"), "LiquidDrop")
 CERT_DIR = os.path.join(UPLOAD_DIR, ".certs")
 TOKEN_FILE = os.path.join(UPLOAD_DIR, ".token")
+INSTANCE_FILE = os.path.join(UPLOAD_DIR, ".instance.json")
 CHUNK = 256 * 1024
 SECURE = False
 PIN_CODE = ""
+HOST_VIEW_URL = ""
+INSTANCE_OWNED = False
+INSTANCE_STATE = {}
 
 # PIN brute-force protection
 _pin_fails = {}          # ip -> (fail_count, last_fail_time)
@@ -73,6 +78,142 @@ def get_local_ip():
 
 
 LOCAL_IP = get_local_ip()
+
+
+def get_host_ips():
+    ips = {"127.0.0.1", "::1", LOCAL_IP}
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            ip = info[4][0]
+            if ip:
+                ips.add(ip.split("%", 1)[0])
+    except socket.gaierror:
+        pass
+    return {ip for ip in ips if ip}
+
+
+HOST_IPS = get_host_ips()
+
+
+def is_host_client_ip(ip):
+    if not ip:
+        return False
+    return ip.split("%", 1)[0] in HOST_IPS
+
+
+def _pid_exists(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            access = 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION
+            handle = ctypes.windll.kernel32.OpenProcess(access, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _read_instance_state():
+    try:
+        with open(INSTANCE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _write_instance_state(state):
+    tmp = INSTANCE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp, INSTANCE_FILE)
+
+
+def build_instance_state(port, secure, base_url, host_url, status="starting"):
+    return {
+        "pid": os.getpid(),
+        "port": port,
+        "secure": secure,
+        "token": TOKEN,
+        "local_ip": LOCAL_IP,
+        "base_url": base_url,
+        "host_url": host_url,
+        "status": status,
+        "version": APP_VERSION,
+        "started_at": int(time.time()),
+    }
+
+
+def claim_single_instance(state):
+    global INSTANCE_OWNED, INSTANCE_STATE
+
+    for _ in range(3):
+        try:
+            fd = os.open(INSTANCE_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            existing = _read_instance_state() or {}
+            if _pid_exists(existing.get("pid")):
+                return False, existing
+            try:
+                os.remove(INSTANCE_FILE)
+            except OSError:
+                time.sleep(0.1)
+            continue
+
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        INSTANCE_OWNED = True
+        INSTANCE_STATE = dict(state)
+        atexit.register(release_instance)
+        return True, INSTANCE_STATE
+
+    return False, _read_instance_state() or {}
+
+
+def update_instance_state(**updates):
+    global INSTANCE_STATE
+    if not INSTANCE_OWNED:
+        return
+    INSTANCE_STATE.update(updates)
+    try:
+        _write_instance_state(INSTANCE_STATE)
+    except OSError:
+        pass
+
+
+def release_instance():
+    global INSTANCE_OWNED, INSTANCE_STATE
+    if not INSTANCE_OWNED:
+        return
+    current = _read_instance_state()
+    if current and current.get("pid") not in (None, os.getpid()):
+        return
+    try:
+        os.remove(INSTANCE_FILE)
+    except OSError:
+        pass
+    INSTANCE_OWNED = False
+    INSTANCE_STATE = {}
 
 # ── Dependency helper ────────────────────────────────────────────────────
 
@@ -224,6 +365,115 @@ def format_fingerprint(cert_pem):
 
 BASE_URL = ""
 QR_PNG_BYTES = None
+APP_ICON_SVG_BYTES = None
+APP_ICON_PNG_BYTES = None
+APP_ICON_ICO_BYTES = None
+
+
+def _liquiddrop_icon_svg():
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" fill="none">
+<defs>
+  <linearGradient id="bg" x1="18" y1="12" x2="162" y2="168" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#1b1d44"/>
+    <stop offset="1" stop-color="#16283b"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(70 48) rotate(43) scale(68 58)">
+    <stop stop-color="#6EE7B7" stop-opacity=".42"/>
+    <stop offset="1" stop-color="#6EE7B7" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="drop" x1="90" y1="28" x2="90" y2="138" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#9FE2FF"/>
+    <stop offset=".44" stop-color="#68B9FF"/>
+    <stop offset="1" stop-color="#6EE7B7"/>
+  </linearGradient>
+</defs>
+<rect width="180" height="180" rx="42" fill="url(#bg)"/>
+<rect x="1" y="1" width="178" height="178" rx="41" stroke="#FFFFFF" stroke-opacity=".12"/>
+<circle cx="66" cy="46" r="44" fill="url(#glow)"/>
+<path d="M90 26C72 50 56 72 56 98C56 123.1 71.7 142 90 142C108.3 142 124 123.1 124 98C124 72 108 50 90 26Z" fill="url(#drop)"/>
+<path d="M77 65C81 53 89 41 95 34C86 43 74 59 71 73C68.6 84.2 74.4 89.8 80 91C74.5 85.8 73.5 76 77 65Z" fill="white" fill-opacity=".36"/>
+</svg>""".encode("utf-8")
+
+
+def generate_app_icons():
+    global APP_ICON_SVG_BYTES, APP_ICON_PNG_BYTES, APP_ICON_ICO_BYTES
+    APP_ICON_SVG_BYTES = _liquiddrop_icon_svg()
+    try:
+        pip_install("Pillow", "PIL")
+        from PIL import Image, ImageDraw, ImageFilter
+
+        size = 180
+        bg = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(bg)
+        top = (27, 29, 68, 255)
+        bottom = (22, 40, 59, 255)
+        for y in range(size):
+            t = y / max(size - 1, 1)
+            color = tuple(
+                int(top[i] + (bottom[i] - top[i]) * t) for i in range(4)
+            )
+            draw.line((0, y, size, y), fill=color)
+
+        card_mask = Image.new("L", (size, size), 0)
+        ImageDraw.Draw(card_mask).rounded_rectangle(
+            (0, 0, size - 1, size - 1), radius=42, fill=255
+        )
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        img.paste(bg, (0, 0), card_mask)
+
+        glow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glow)
+        gd.ellipse((20, 10, 118, 108), fill=(110, 231, 183, 92))
+        gd.ellipse((56, 18, 136, 98), fill=(129, 140, 248, 58))
+        glow = glow.filter(ImageFilter.GaussianBlur(18))
+        img = Image.alpha_composite(img, glow)
+
+        drop_mask = Image.new("L", (size, size), 0)
+        dm = ImageDraw.Draw(drop_mask)
+        dm.polygon([(90, 26), (56, 90), (124, 90)], fill=255)
+        dm.ellipse((54, 72, 126, 144), fill=255)
+
+        drop = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        dd = ImageDraw.Draw(drop)
+        top_drop = (159, 226, 255, 255)
+        bottom_drop = (110, 231, 183, 255)
+        for y in range(size):
+            t = y / max(size - 1, 1)
+            color = tuple(
+                int(top_drop[i] + (bottom_drop[i] - top_drop[i]) * t)
+                for i in range(4)
+            )
+            dd.line((0, y, size, y), fill=color)
+        drop.putalpha(drop_mask)
+        img = Image.alpha_composite(img, drop)
+
+        shine = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(shine)
+        sd.ellipse((70, 46, 102, 88), fill=(255, 255, 255, 88))
+        sd.ellipse((64, 56, 92, 112), fill=(255, 255, 255, 36))
+        shine = shine.filter(ImageFilter.GaussianBlur(6))
+        img = Image.alpha_composite(img, shine)
+
+        outline = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        od = ImageDraw.Draw(outline)
+        od.rounded_rectangle(
+            (1, 1, size - 2, size - 2),
+            radius=41,
+            outline=(255, 255, 255, 26),
+            width=1,
+        )
+        img = Image.alpha_composite(img, outline)
+
+        png_buf = io.BytesIO()
+        img.save(png_buf, format="PNG")
+        APP_ICON_PNG_BYTES = png_buf.getvalue()
+
+        ico_buf = io.BytesIO()
+        img.save(ico_buf, format="ICO", sizes=[(64, 64), (32, 32), (16, 16)])
+        APP_ICON_ICO_BYTES = ico_buf.getvalue()
+    except Exception:
+        APP_ICON_PNG_BYTES = None
+        APP_ICON_ICO_BYTES = None
 
 
 def generate_qr():
@@ -477,7 +727,7 @@ def _clear_pin_fails(ip):
 # ── HTML UI ──────────────────────────────────────────────────────────────
 
 
-def build_html_page():
+def build_html_page(is_host=False):
     protocol = "HTTPS" if SECURE else "HTTP"
     lock_icon = "🔒" if SECURE else "🌐"
     sec_label = "TLS Encrypted · HTTPS" if SECURE else "Local Network · HTTP"
@@ -485,6 +735,29 @@ def build_html_page():
         f"SHA-256: {CERT_FINGERPRINT[:23]}…"
         if SECURE
         else "Secret token protected · WiFi encrypted (WPA)"
+    )
+    body_class = "host-view" if is_host else ""
+    host_panel_html = (
+        """<div class="host-panel glass fade-in app-host" style="animation-delay:.08s">
+  <div class="host-panel-head">
+    <div>
+      <div class="host-eyebrow">Host Controls</div>
+      <h2>This computer is running LiquidDrop</h2>
+      <p id="hostStatusNote">Stop sharing when you're finished.</p>
+    </div>
+    <div class="host-status">Host Only</div>
+  </div>
+  <button class="stop-btn" id="stopServerBtn">⏹ Stop LiquidDrop</button>
+</div>"""
+        if is_host
+        else ""
+    )
+    host_section_html = (
+        """<div class="app-stack app-host-shell">"""
+        + host_panel_html
+        + """</div>"""
+        if is_host
+        else ""
     )
 
     return (
@@ -495,6 +768,13 @@ def build_html_page():
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="LiquidDrop">
+<meta name="application-name" content="LiquidDrop">
+<meta name="theme-color" content="#141935">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
+<link rel="shortcut icon" href="/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <title>LiquidDrop</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
@@ -512,6 +792,8 @@ body{
   padding:calc(var(--safe-top) + 16px) 16px calc(var(--safe-bottom) + 100px);
   -webkit-font-smoothing:antialiased;
 }
+.app-shell{position:relative;z-index:1;display:flex;flex-direction:column;gap:16px}
+.app-stack{display:flex;flex-direction:column;gap:16px}
 .orb{position:fixed;border-radius:50%;filter:blur(80px);opacity:.35;pointer-events:none;z-index:0}
 .orb-1{width:340px;height:340px;background:radial-gradient(circle,#6ee7b7,transparent 70%);top:-80px;right:-60px;animation:f1 12s ease-in-out infinite}
 .orb-2{width:400px;height:400px;background:radial-gradient(circle,#818cf8,transparent 70%);bottom:-100px;left:-80px;animation:f2 15s ease-in-out infinite}
@@ -525,53 +807,74 @@ body{
   box-shadow:0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.08);
 }
 .glass::before{content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,transparent 50%);pointer-events:none}
-.header{text-align:center;padding:28px 20px 20px;margin-bottom:16px}
+.header{text-align:center;padding:24px 20px 20px}
 .logo{font-size:42px;margin-bottom:4px;display:block;filter:drop-shadow(0 0 20px rgba(110,231,183,0.4))}
 .header h1{font-size:28px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2),var(--accent3));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;letter-spacing:-0.5px}
 .header p{color:var(--text2);font-size:13px;margin-top:6px;font-weight:500}
 .device-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(110,231,183,0.1);border:1px solid rgba(110,231,183,0.2);border-radius:100px;padding:5px 14px;font-size:12px;color:var(--accent);margin-top:12px;font-weight:600}
 .device-badge .dot{width:7px;height:7px;background:var(--accent);border-radius:50%;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-.security-badge{display:flex;align-items:center;gap:10px;padding:14px 18px;margin-bottom:16px;font-size:12px}
+.security-badge{display:flex;align-items:center;gap:10px;padding:14px 18px;font-size:12px}
 .security-badge .lock{font-size:20px}
 .security-info{flex:1;min-width:0}
 .security-info strong{display:block;font-size:13px;color:var(--accent);margin-bottom:2px}
 .security-info span{color:var(--text2);font-size:11px;word-break:break-all;font-family:'SF Mono',ui-monospace,monospace}
-.qr-section{padding:24px;margin-bottom:16px;text-align:center}
+.host-panel{padding:18px}
+.host-panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.host-eyebrow,.files-eyebrow{font-size:12px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--accent)}
+.host-panel h2{font-size:18px;font-weight:700;letter-spacing:-0.25px;margin-top:4px}
+.host-panel p{font-size:12px;color:var(--text2);line-height:1.45;margin-top:6px}
+.host-status,.files-status{flex-shrink:0;padding:8px 12px;border-radius:999px;border:1px solid rgba(110,231,183,0.2);background:rgba(110,231,183,0.08);color:var(--accent);font-size:11px;font-weight:700;letter-spacing:.7px;text-transform:uppercase}
+.stop-btn{width:100%;margin-top:16px;padding:15px 18px;border:none;border-radius:18px;background:linear-gradient(135deg,#fb7185,#ef4444);color:#fff;font-size:15px;font-weight:800;cursor:pointer;transition:all .2s ease;font-family:inherit}
+.stop-btn:hover{transform:translateY(-1px);box-shadow:0 0 24px rgba(239,68,68,0.35)}
+.stop-btn:active{transform:scale(0.98)}
+.stop-btn:disabled{opacity:.7;cursor:wait;transform:none;box-shadow:none}
+.qr-section{padding:22px;text-align:center}
 .qr-section h2{font-size:15px;font-weight:600;margin-bottom:14px;color:var(--text2)}
 .qr-wrap{display:inline-block;padding:14px;background:#fff;border-radius:18px;box-shadow:0 4px 24px rgba(0,0,0,0.25)}
 .qr-wrap img{display:block;width:180px;height:180px}
 .qr-url{margin-top:14px;font-size:11px;color:var(--text2);word-break:break-all;font-family:'SF Mono',ui-monospace,monospace;background:rgba(255,255,255,0.04);padding:8px 14px;border-radius:12px;cursor:pointer;transition:background .2s}
 .qr-url:hover{background:rgba(255,255,255,0.08)}
-.dropzone{padding:40px 20px;margin:0 0 16px;text-align:center;cursor:pointer;transition:all .3s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden}
+.dropzone{padding:38px 20px;text-align:center;cursor:pointer;transition:all .3s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden}
 .dropzone:hover,.dropzone.drag-over{background:rgba(110,231,183,0.08);border-color:rgba(110,231,183,0.3);transform:scale(1.01)}
 .dropzone.drag-over .drop-icon{transform:scale(1.15);filter:drop-shadow(0 0 30px rgba(110,231,183,0.6))}
 .drop-icon{font-size:52px;display:block;margin-bottom:12px;transition:all .3s ease}
 .dropzone h2{font-size:18px;font-weight:600;margin-bottom:6px}
 .dropzone p{color:var(--text2);font-size:13px}
 .dropzone input{display:none}
-.upload-bar{margin:0 0 16px;padding:16px 20px;opacity:0;transform:translateY(-10px);transition:all .4s ease;pointer-events:none}
-.upload-bar.active{opacity:1;transform:translateY(0);pointer-events:auto}
+.upload-bar{max-height:0;padding:0 20px;opacity:0;transform:translateY(-10px);transition:max-height .35s ease,padding .35s ease,opacity .35s ease,transform .35s ease;pointer-events:none;overflow:hidden}
+.upload-bar.active{max-height:120px;padding:16px 20px;opacity:1;transform:translateY(0);pointer-events:auto}
 .upload-info{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .upload-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:55%}
 .upload-speed{font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums}
 .upload-pct{font-size:13px;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
 .progress-track{height:6px;border-radius:3px;background:rgba(255,255,255,0.06);overflow:hidden}
 .progress-fill{height:100%;border-radius:3px;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .15s linear;box-shadow:0 0 16px rgba(110,231,183,0.3)}
-.section-title{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--text2);padding:0 8px;margin:20px 0 10px}
-.file-list{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
-.file-card{padding:14px 18px;display:flex;align-items:center;gap:14px;cursor:default;transition:all .25s ease;text-decoration:none;color:inherit}
+.files-panel.glass{background:transparent;border:none;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;padding:0}
+.files-panel.glass::before{display:none}
+.files-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 4px 4px}
+.files-heading{display:flex;align-items:center;gap:10px;min-width:0}
+.file-list-wrap{min-height:72px}
+.file-list{display:flex;flex-direction:column;gap:10px}
+.file-card{padding:16px 18px;display:flex;align-items:center;gap:14px;cursor:default;transition:all .25s ease;text-decoration:none;color:inherit}
 .file-card:active{transform:scale(0.985)}
-.file-icon{width:44px;height:44px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;background:linear-gradient(135deg,rgba(110,231,183,0.15),rgba(129,140,248,0.15));border:1px solid rgba(255,255,255,0.08)}
-.file-icon.img-type{background:linear-gradient(135deg,rgba(244,114,182,0.2),rgba(251,146,60,0.15))}
-.file-icon.vid-type{background:linear-gradient(135deg,rgba(129,140,248,0.2),rgba(244,114,182,0.15))}
-.file-icon.doc-type{background:linear-gradient(135deg,rgba(56,189,248,0.2),rgba(110,231,183,0.15))}
+.file-preview{width:54px;height:54px;border-radius:16px;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;background:linear-gradient(135deg,rgba(110,231,183,0.15),rgba(129,140,248,0.18));border:1px solid rgba(255,255,255,0.08);position:relative}
+.file-preview img,.file-preview video{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit;background:rgba(255,255,255,0.04)}
+.file-preview.placeholder{font-size:22px;color:var(--text2)}
+.file-preview.img-type{background:linear-gradient(135deg,rgba(244,114,182,0.2),rgba(251,146,60,0.15))}
+.file-preview.vid-type{background:linear-gradient(135deg,rgba(129,140,248,0.2),rgba(244,114,182,0.15))}
+.file-preview.vid-type::after{content:'▶';position:absolute;right:6px;bottom:6px;width:18px;height:18px;border-radius:999px;background:rgba(10,10,26,0.66);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.file-preview.doc-type{background:linear-gradient(135deg,rgba(56,189,248,0.2),rgba(110,231,183,0.15))}
+.file-preview.audio-type{background:linear-gradient(135deg,rgba(251,191,36,0.42),rgba(244,114,182,0.34));color:#fff;font-size:26px;text-shadow:0 2px 12px rgba(124,58,237,0.38);isolation:isolate}
+.file-preview.audio-type::before{content:'';position:absolute;inset:8px;border-radius:14px;background:rgba(255,255,255,0.18);border:1px solid rgba(255,255,255,0.18);box-shadow:inset 0 1px 0 rgba(255,255,255,0.16);z-index:0}
+.file-preview.audio-type span{position:relative;z-index:1;display:block;transform:translateY(1px)}
+.file-preview.code-type{background:linear-gradient(135deg,rgba(96,165,250,0.22),rgba(129,140,248,0.16));font-size:16px;font-weight:800;font-family:'SF Mono',ui-monospace,monospace;letter-spacing:-0.4px}
 .file-meta{flex:1;min-width:0}
-.file-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-name{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .file-detail{font-size:12px;color:var(--text2);margin-top:2px}
-.file-dl{font-size:15px;flex-shrink:0;transition:all .2s;padding:10px 12px;border-radius:12px;background:rgba(110,231,183,0.08);color:var(--accent);text-decoration:none;display:flex;align-items:center;justify-content:center;line-height:1}
+.file-dl{font-size:15px;flex-shrink:0;transition:all .2s;padding:10px 12px;border-radius:14px;background:rgba(110,231,183,0.08);color:var(--accent);text-decoration:none;display:flex;align-items:center;justify-content:center;line-height:1}
 .file-dl:hover{background:rgba(110,231,183,0.18);color:var(--accent)}
-.file-delete{font-size:15px;flex-shrink:0;padding:10px 12px;cursor:pointer;transition:all .2s;border:none;background:rgba(255,80,80,0.08);color:rgba(255,100,100,0.8);border-radius:12px;display:flex;align-items:center;justify-content:center;line-height:1}
+.file-delete{font-size:15px;flex-shrink:0;padding:10px 12px;cursor:pointer;transition:all .2s;border:none;background:rgba(255,80,80,0.08);color:rgba(255,100,100,0.8);border-radius:14px;display:flex;align-items:center;justify-content:center;line-height:1}
 .file-delete:hover{background:rgba(255,80,80,0.18);color:rgba(255,100,100,1)}
 .file-delete:active{transform:scale(0.92)}
 .empty-state{text-align:center;padding:40px 20px;color:var(--text2);font-size:14px}
@@ -619,17 +922,20 @@ body{
 }
 .file-checkbox:checked::before,.file-checkbox:checked::after{display:none !important;content:none !important}
 
-.batch-toolbar{display:none;align-items:center;gap:10px;padding:12px 18px;margin:0 0 10px}
+.batch-toolbar{display:none;flex-direction:column;align-items:stretch;gap:12px;padding:14px 16px;margin:0 0 10px;overflow:hidden}
 .batch-toolbar.show{display:flex}
-.batch-info{flex:1;font-size:13px;font-weight:600;color:var(--text2)}
+.batch-row{display:flex;align-items:center;gap:12px}
+.batch-main{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+.batch-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.batch-info{font-size:13px;font-weight:600;color:var(--text2);white-space:nowrap}
 .batch-info strong{color:var(--accent)}
-.batch-btn{padding:10px 16px;border:none;border-radius:14px;font-size:13px;font-weight:700;cursor:pointer;transition:all .2s;font-family:inherit;display:flex;align-items:center;gap:6px}
+.batch-btn{flex:1;padding:12px 16px;border:none;border-radius:16px;font-size:14px;font-weight:700;cursor:pointer;transition:all .2s;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px}
 .batch-btn:active{transform:scale(0.96)}
 .batch-btn.del{background:rgba(255,80,80,0.12);color:rgba(255,120,120,0.9);border:1px solid rgba(255,80,80,0.2)}
 .batch-btn.del:hover{background:rgba(255,80,80,0.2)}
 .batch-btn.dl{background:rgba(110,231,183,0.1);color:var(--accent);border:1px solid rgba(110,231,183,0.2)}
 .batch-btn.dl:hover{background:rgba(110,231,183,0.18)}
-.select-all-wrap{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text2);font-weight:600;padding:2px 0;user-select:none;-webkit-user-select:none}
+.select-all-wrap{display:flex;align-items:center;gap:10px;cursor:pointer;font-size:15px;color:var(--text);font-weight:700;padding:2px 0;user-select:none;-webkit-user-select:none;min-width:0;white-space:nowrap}
 .select-all-wrap:hover{color:var(--text)}
 .confirm-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);z-index:950;display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;pointer-events:none;transition:opacity .3s ease}
 .confirm-overlay.show{opacity:1;pointer-events:auto}
@@ -648,25 +954,94 @@ body{
 .confirm-btn.danger:hover{box-shadow:0 0 24px rgba(248,113,113,0.3)}
 .confirm-btn.action{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0a0a1a}
 .confirm-btn.action:hover{box-shadow:0 0 24px rgba(110,231,183,0.3)}
-@media(min-width:600px){body{max-width:480px;margin:0 auto;padding:40px 20px 120px}.dropzone{padding:56px 20px}}
+.shutdown-screen{position:fixed;inset:0;z-index:1200;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(circle at top,rgba(110,231,183,0.12),transparent 38%),radial-gradient(circle at bottom,rgba(129,140,248,0.16),transparent 42%),rgba(8,8,22,0.94);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);opacity:0;pointer-events:none;transition:opacity .45s ease}
+.shutdown-screen.show{opacity:1;pointer-events:auto}
+.shutdown-card{max-width:520px;width:100%;padding:34px 30px 30px;text-align:center}
+.shutdown-icon{font-size:54px;display:block;margin-bottom:10px;filter:drop-shadow(0 0 22px rgba(110,231,183,0.28))}
+.shutdown-card h2{font-size:32px;font-weight:800;letter-spacing:-0.7px;margin-bottom:10px;background:linear-gradient(135deg,#f0fdf4,#93c5fd,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.shutdown-card p{font-size:15px;line-height:1.7;color:var(--text2);margin-bottom:12px}
+.shutdown-note{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:999px;background:rgba(110,231,183,0.08);border:1px solid rgba(110,231,183,0.18);color:var(--accent);font-size:13px;font-weight:700;margin-top:6px}
+@media(min-width:600px){body{padding:40px 20px 120px}.dropzone{padding:56px 20px}}
+@media(min-width:980px){
+  body{padding:24px 28px 32px}
+  .app-shell{max-width:1360px;margin:0 auto;display:grid;grid-template-columns:minmax(0,1.38fr) minmax(360px,.84fr);gap:18px 28px;align-items:start}
+  body.host-view .app-shell{
+    grid-template-areas:
+      "intro qr"
+      "host qr"
+      "upload upload"
+      "files files";
+  }
+  body:not(.host-view) .app-shell{
+    grid-template-areas:
+      "intro qr"
+      "upload upload"
+      "files files";
+  }
+  .app-intro{grid-area:intro}
+  .app-upload-shell{grid-area:upload}
+  .app-host-shell{grid-area:host}
+  .app-qr-shell{grid-area:qr}
+  .app-files-shell{grid-area:files}
+  .app-header{text-align:left;padding:28px 30px 26px;min-height:206px;display:flex;flex-direction:column;justify-content:center}
+  .app-security,.app-host,.app-upload,.app-qr,.app-files{margin-bottom:0}
+  .app-upload-shell{display:flex;flex-direction:column;gap:0}
+  .app-drop{min-height:184px;display:flex;flex-direction:column;justify-content:center;padding:32px 30px}
+  .app-upload-shell .upload-bar{margin-top:0}
+  .app-upload-shell .upload-bar.active{margin-top:12px}
+  .app-qr-shell{display:flex;align-self:stretch}
+  .app-qr{position:relative;z-index:2;display:flex;flex-direction:column;justify-content:center;width:100%;height:100%}
+  .app-qr .qr-wrap{display:flex;align-items:center;justify-content:center;align-self:center}
+  .app-qr .qr-wrap img{margin:0 auto}
+  .app-files{overflow:hidden}
+  .files-panel.glass{
+    background:var(--glass);backdrop-filter:blur(40px) saturate(1.6);-webkit-backdrop-filter:blur(40px) saturate(1.6);
+    border:1px solid var(--glass-border);border-radius:var(--radius);position:relative;z-index:1;
+    box-shadow:0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.08);
+    padding:18px 18px 16px;display:flex;flex-direction:column;width:100%
+  }
+  .files-panel.glass::before{display:block;content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,transparent 50%);pointer-events:none}
+  .files-panel-head{padding:0 8px 8px}
+  .file-list-wrap{min-height:0;max-height:min(52vh,620px);overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding-right:6px;scrollbar-gutter:stable}
+  .file-list{height:auto;overflow:visible;padding-right:0}
+  .batch-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:16px;padding:12px 14px}
+  .batch-toolbar.show{display:grid}
+  .batch-row{min-width:0}
+  .batch-main{gap:12px}
+  .batch-actions{display:flex;gap:10px;min-width:0}
+  .batch-btn{min-width:140px;padding:11px 14px;font-size:13px}
+  .header h1{font-size:38px}
+  .header p{font-size:15px}
+  .device-badge{margin-top:14px}
+  .qr-section{padding:28px}
+  .qr-wrap img{width:210px;height:210px}
+  .dropzone h2{font-size:24px}
+  .dropzone p{font-size:15px}
+  .host-panel h2{font-size:19px}
+}
 .fade-in{animation:fadeIn .5s ease both}
 @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 .file-card{animation:slideIn .35s ease both}
 @keyframes slideIn{from{opacity:0;transform:translateX(-16px)}to{opacity:1;transform:none}}
-::-webkit-scrollbar{width:0;background:transparent}
+.file-list::-webkit-scrollbar,.file-list-wrap::-webkit-scrollbar{width:8px;background:transparent}
+.file-list::-webkit-scrollbar-thumb,.file-list-wrap::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border-radius:999px}
 </style>
 </head>
-<body>
+<body class=\""""
+        + body_class
+        + """\">
 <div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div>
 
-<div class="header glass fade-in">
+<div class="app-shell">
+<div class="app-stack app-intro">
+<div class="header glass fade-in app-header">
   <span class="logo">\U0001f4a7</span>
   <h1>LiquidDrop</h1>
   <p>Tap to send \xb7 Tap to receive</p>
   <div class="device-badge"><span class="dot"></span> Connected on local network</div>
 </div>
 
-<div class="security-badge glass fade-in" style="animation-delay:.03s">
+<div class="security-badge glass fade-in app-security" style="animation-delay:.03s">
   <span class="lock">"""
         + lock_icon
         + """</span>
@@ -679,8 +1054,10 @@ body{
         + """</span>
   </div>
 </div>
+</div>
 
-<div class="qr-section glass fade-in" id="qrSection" style="animation-delay:.05s">
+<div class="app-stack app-qr-shell">
+<div class="qr-section glass fade-in app-qr" id="qrSection" style="animation-delay:.05s">
   <h2>\U0001f4f1 Scan to open on another device</h2>
   <div class="qr-wrap"><img src="/"""
         + TOKEN
@@ -698,15 +1075,21 @@ body{
         + """</span></div>
   </div>
 </div>
+</div>
 
-<div class="dropzone glass fade-in" id="dropzone" style="animation-delay:.1s">
+"""
+        + host_section_html
+        + """
+
+<div class="app-stack app-upload-shell">
+<div class="dropzone glass fade-in app-drop" id="dropzone" style="animation-delay:.1s">
   <span class="drop-icon">\u2b06\ufe0f</span>
   <h2>Send Files</h2>
   <p>Tap here or drag & drop anything</p>
   <input type="file" id="fileInput" multiple>
 </div>
 
-<div class="upload-bar glass" id="uploadBar">
+<div class="upload-bar glass app-upload" id="uploadBar">
   <div class="upload-info">
     <div style="display:flex;flex-direction:column;min-width:0;flex:1">
       <span class="upload-name" id="uploadName">file.zip</span>
@@ -716,15 +1099,34 @@ body{
   </div>
   <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
 </div>
-
-<div class="section-title" id="filesTitle" style="display:none">\U0001f4c1 Shared Files</div>
-<div class="batch-toolbar glass" id="batchToolbar">
-  <label class="select-all-wrap"><input type="checkbox" class="file-checkbox" id="selectAll"> Select All</label>
-  <div class="batch-info"><strong id="selectedCount">0</strong> selected</div>
-  <button class="batch-btn dl" id="batchDownloadBtn">\u2193 Download</button>
-  <button class="batch-btn del" id="batchDeleteBtn">\u2715 Delete</button>
 </div>
-<div class="file-list" id="fileList"></div>
+
+<div class="app-stack app-files-shell">
+<div class="files-panel glass fade-in app-files" style="animation-delay:.12s">
+  <div class="files-panel-head">
+    <div class="files-heading">
+      <div class="files-eyebrow">\U0001f4c1 Shared Files</div>
+    </div>
+    <div class="files-status">Live</div>
+  </div>
+  <div class="batch-toolbar glass" id="batchToolbar">
+    <div class="batch-row">
+      <div class="batch-main">
+        <label class="select-all-wrap"><input type="checkbox" class="file-checkbox" id="selectAll"> Select All</label>
+        <div class="batch-info"><strong id="selectedCount">0</strong> selected</div>
+      </div>
+    </div>
+    <div class="batch-actions">
+      <button class="batch-btn dl" id="batchDownloadBtn">\u2193 Download</button>
+      <button class="batch-btn del" id="batchDeleteBtn">\u2715 Delete</button>
+    </div>
+  </div>
+  <div class="file-list-wrap">
+    <div class="file-list" id="fileList"></div>
+  </div>
+</div>
+</div>
+</div>
 <div class="toast" id="toast"></div>
 
 <div class="modal-overlay" id="zipModal">
@@ -751,16 +1153,67 @@ body{
   </div>
 </div>
 
+<div class="shutdown-screen" id="shutdownScreen">
+  <div class="shutdown-card glass">
+    <span class="shutdown-icon">\U0001f49a</span>
+    <h2>LiquidDrop has safely shut down</h2>
+    <p>Everything is wrapped up. Thanks for sharing a little moment of convenience with someone.</p>
+    <p>You can close this tab now. If you started LiquidDrop from the Windows launcher, the command window should close automatically too.</p>
+    <div class="shutdown-note">\u2713 Session ended successfully</div>
+  </div>
+</div>
+
 <script>
 const $=s=>document.querySelector(s);
 const TOKEN=location.pathname.split('/')[1];
 const API='/'+TOKEN;
+const IMAGE_EXTS=['jpg','jpeg','png','gif','webp','heic','svg','bmp','ico','avif'];
+const VIDEO_EXTS=['mp4','mov','avi','mkv','webm','m4v'];
+const AUDIO_EXTS=['mp3','wav','m4a','aac','flac','ogg','oga','opus','weba','aiff','wma','mid','midi'];
+const CODE_EXTS=['py','pyw','js','mjs','cjs','ts','tsx','jsx','java','c','cc','cpp','cxx','h','hpp','cs','go','rs','php','rb','swift','kt','kts','dart','lua','pl','r','sh','bash','zsh','bat','cmd','ps1','sql','html','htm','css','scss','sass','less','json','xml','yaml','yml','toml','ini','cfg','conf','vue','svelte','ipynb'];
+const DOC_EXTS=['pdf','doc','docx','txt','rtf','odt','pages','xls','xlsx','csv','tsv','ppt','pptx','key','numbers','md'];
 
 $('#urlCopy').addEventListener('click',()=>{
   navigator.clipboard.writeText($('#urlCopy').textContent)
     .then(()=>toast('\U0001f4cb URL copied!','success'))
     .catch(()=>{});
 });
+
+function showShutdownScreen(){
+  const screen=$('#shutdownScreen');
+  if(!screen) return;
+  document.body.style.overflow='hidden';
+  $('#confirmOverlay').classList.remove('show');
+  $('#zipModal').classList.remove('show');
+  screen.classList.add('show');
+}
+
+const stopServerBtn=$('#stopServerBtn');
+if(stopServerBtn){
+  stopServerBtn.addEventListener('click',()=>{
+    showConfirm(
+      '\u23f9\ufe0f',
+      'Stop LiquidDrop',
+      'This will stop sharing and disconnect every device using this session.',
+      'Stop LiquidDrop',
+      'danger',
+      async()=>{
+        stopServerBtn.disabled=true;
+        stopServerBtn.textContent='Shutting down...';
+        try{
+          const r=await fetch(API+'/shutdown',{method:'POST'});
+          if(!r.ok) throw new Error('HTTP '+r.status);
+          $('#hostStatusNote').textContent='LiquidDrop has safely shut down.';
+          showShutdownScreen();
+        } catch(e){
+          stopServerBtn.disabled=false;
+          stopServerBtn.textContent='\u23f9 Stop LiquidDrop';
+          toast('\u2717 Shutdown failed','error');
+        }
+      }
+    );
+  });
+}
 
 const dz=$('#dropzone'),fi=$('#fileInput');
 dz.addEventListener('click',()=>fi.click());
@@ -812,6 +1265,50 @@ function fmtSpeed(bps){
   if(bps<1048576) return(bps/1024).toFixed(0)+' KB/s';
   if(bps<1073741824) return(bps/1048576).toFixed(1)+' MB/s';
   return(bps/1073741824).toFixed(2)+' GB/s';
+}
+
+function getFileKind(name){
+  const ext=name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  if(IMAGE_EXTS.includes(ext)) return 'image';
+  if(VIDEO_EXTS.includes(ext)) return 'video';
+  if(AUDIO_EXTS.includes(ext)) return 'audio';
+  if(CODE_EXTS.includes(ext)) return 'code';
+  if(DOC_EXTS.includes(ext)) return 'document';
+  return 'other';
+}
+
+function filePreviewMarkup(file){
+  const kind=getFileKind(file.name);
+  const src=API+'/preview/'+encodeURIComponent(file.name);
+  if(kind==='image'){
+    return '<div class="file-preview img-type"><img src="'+src+'" alt=""></div>';
+  }
+  if(kind==='video'){
+    return '<div class="file-preview vid-type"><video muted playsinline preload="metadata" data-preview-video src="'+src+'"></video></div>';
+  }
+  if(kind==='audio'){
+    return '<div class="file-preview placeholder audio-type"><span>\U0001f3b5</span></div>';
+  }
+  if(kind==='code'){
+    return '<div class="file-preview placeholder code-type">&lt;/&gt;</div>';
+  }
+  if(kind==='document'){
+    return '<div class="file-preview placeholder doc-type">\U0001f4c4</div>';
+  }
+  return '<div class="file-preview placeholder">\U0001f4e6</div>';
+}
+
+function hydratePreviewMedia(){
+  document.querySelectorAll('video[data-preview-video]:not([data-hydrated])').forEach(v=>{
+    v.dataset.hydrated='1';
+    v.addEventListener('loadedmetadata',()=>{
+      try{
+        const target=v.duration && Number.isFinite(v.duration) ? Math.min(0.15,v.duration/2) : 0;
+        if(target>0) v.currentTime=target;
+      } catch(_){}
+    },{once:true});
+    v.addEventListener('seeked',()=>v.pause(),{once:true});
+  });
 }
 
 function sendXHR(file,displayName){
@@ -902,7 +1399,7 @@ async function loadFiles(){
     if(hash===lastHash) return;
     lastHash=hash;
 
-    const list=$('#fileList'),title=$('#filesTitle');
+    const list=$('#fileList');
 
     /* Prune selected names that no longer exist on disk */
     const existingNames=new Set(files.map(f=>f.name));
@@ -911,29 +1408,22 @@ async function loadFiles(){
     }
 
     if(!files.length){
-      title.style.display='none';
       selectedFiles.clear();
       list.innerHTML='<div class="empty-state"><span>\U0001f30a</span>No files yet \u2014 drop something!</div>';
       updateBatchUI();
       return;
     }
-    title.style.display='block';
     list.innerHTML=files.map((f,i)=>{
-      const ext=f.name.split('.').pop().toLowerCase();
-      const isImg=['jpg','jpeg','png','gif','webp','heic','svg','bmp','ico'].includes(ext);
-      const isVid=['mp4','mov','avi','mkv','webm','m4v'].includes(ext);
-      const isDoc=['pdf','doc','docx','txt','xls','xlsx','ppt','pptx','csv','md'].includes(ext);
-      const ic=isImg?'img-type':isVid?'vid-type':isDoc?'doc-type':'';
-      const em=isImg?'\U0001f5bc\ufe0f':isVid?'\U0001f3ac':isDoc?'\U0001f4c4':'\U0001f4e6';
       const checked=selectedFiles.has(f.name)?'checked':'';
       const dn=f.name.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
       return '<div class="file-card glass" style="animation-delay:'+i*0.06+'s">'+
         '<input type="checkbox" class="file-checkbox file-select" data-name="'+dn+'" '+checked+'>'+
-        '<div class="file-icon '+ic+'">'+em+'</div>'+
+        filePreviewMarkup(f)+
         '<div class="file-meta"><div class="file-name">'+esc(f.name)+'</div><div class="file-detail">'+fmtSize(f.size)+' \xb7 '+fmtTime(f.modified)+'</div></div>'+
         '<button class="file-delete" data-name="'+dn+'" title="Delete">\u2715</button>'+
         '<a href="'+API+'/download/'+encodeURIComponent(f.name)+'" download class="file-dl" title="Download">\u2193</a></div>';
     }).join('');
+    hydratePreviewMedia();
     updateBatchUI();
   } catch(e){/* network hiccup \u2014 silently retry next interval */}
 }
@@ -1158,6 +1648,13 @@ def build_pin_page(error=False, locked=False):
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="LiquidDrop">
+<meta name="application-name" content="LiquidDrop">
+<meta name="theme-color" content="#141935">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
+<link rel="shortcut icon" href="/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <title>LiquidDrop \u2014 Enter PIN</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -1240,7 +1737,7 @@ boxes.forEach((b,i)=>{
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "LiquidDrop/3.1"
+    server_version = f"LiquidDrop/{APP_VERSION}"
     sys_version = ""  # Hide Python version from Server header
 
     def log_message(self, fmt, *args):
@@ -1261,6 +1758,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parts = self.path.strip("/").split("/")
         return parts and parts[0] == TOKEN
 
+    def _is_host_client(self):
+        return is_host_client_ip(self._client_ip())
+
     def _send_json(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
@@ -1280,12 +1780,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_bytes(self, body, content_type, status=200, cache="public, max-age=3600"):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", cache)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path_stripped = self.path.strip("/")
         # Strip query strings for routing
         if "?" in path_stripped:
             path_stripped = path_stripped.split("?", 1)[0]
         parts = path_stripped.split("/", 2)
+        if path_stripped == "favicon.svg":
+            if APP_ICON_SVG_BYTES:
+                self._send_bytes(
+                    APP_ICON_SVG_BYTES,
+                    "image/svg+xml",
+                    cache="public, max-age=86400",
+                )
+            else:
+                self.send_error(404)
+            return
+        elif path_stripped == "favicon.ico":
+            if APP_ICON_ICO_BYTES:
+                self._send_bytes(
+                    APP_ICON_ICO_BYTES,
+                    "image/x-icon",
+                    cache="public, max-age=86400",
+                )
+            elif APP_ICON_PNG_BYTES:
+                self._send_bytes(
+                    APP_ICON_PNG_BYTES,
+                    "image/png",
+                    cache="public, max-age=86400",
+                )
+            else:
+                self.send_error(404)
+            return
+        elif path_stripped == "apple-touch-icon.png":
+            if APP_ICON_PNG_BYTES:
+                self._send_bytes(
+                    APP_ICON_PNG_BYTES,
+                    "image/png",
+                    cache="public, max-age=86400",
+                )
+            else:
+                self.send_error(404)
+            return
 
         # ── Unauthenticated routes (PIN entry page) ──
         if not parts[0] or parts[0] != TOKEN:
@@ -1300,16 +1845,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         route = parts[1] if len(parts) > 1 else ""
 
         if route == "" or route == "index.html":
-            self._send_html(build_html_page())
+            self._send_html(build_html_page(is_host=self._is_host_client()))
 
         elif route == "qr.png":
             if QR_PNG_BYTES:
-                self.send_response(200)
-                self.send_header("Content-Type", "image/png")
-                self.send_header("Content-Length", str(len(QR_PNG_BYTES)))
-                self.send_header("Cache-Control", "public, max-age=3600")
-                self.end_headers()
-                self.wfile.write(QR_PNG_BYTES)
+                self._send_bytes(QR_PNG_BYTES, "image/png")
             else:
                 self.send_error(404)
 
@@ -1333,6 +1873,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except OSError:
                 pass
             self._send_json(files)
+
+        elif route == "preview" and len(parts) > 2:
+            fname = urllib.parse.unquote(parts[2])
+            fpath = _safe_path(fname)
+            if fpath is None:
+                self.send_error(404)
+                return
+            fsize = fpath.stat().st_size
+            mime = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(fsize))
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Disposition", 'inline; filename="preview"')
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            try:
+                with open(fpath, "rb") as f:
+                    while True:
+                        chunk = f.read(CHUNK)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         elif route == "download" and len(parts) > 2:
             fname = urllib.parse.unquote(parts[2])
@@ -1434,6 +2000,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     sz = f"{written} B"
                 print(f"  \033[36m\u2b06  Received:\033[0m {dest.name} ({sz})")
             self._send_json({"status": "ok", "count": count})
+        elif route == "shutdown":
+            if not self._is_host_client():
+                self.send_error(403, "Host only")
+                return
+            self._send_json({"status": "shutting_down"})
+            self.server.initiate_shutdown(
+                "  \033[33m⏹  Shutdown requested from the host web app\033[0m"
+            )
         else:
             self.send_error(404)
 
@@ -1461,10 +2035,20 @@ class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     request_queue_size = 32
     daemon_threads = True
+    _shutdown_started = False
+
+    def initiate_shutdown(self, message=None):
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+        update_instance_state(status="stopping")
+        if message:
+            print(message)
+        threading.Timer(0.2, self.shutdown).start()
 
 
 def main():
-    global BASE_URL, SECURE, TOKEN, PIN_CODE, PORT
+    global BASE_URL, SECURE, TOKEN, PIN_CODE, PORT, HOST_VIEW_URL
 
     parser = argparse.ArgumentParser(
         description="\U0001f4a7 LiquidDrop \u2014 Local File Transfer"
@@ -1486,83 +2070,125 @@ def main():
     SECURE = args.secure
     port = args.port
     PORT = port
+    protocol = "https" if SECURE else "http"
+    BASE_URL = f"{protocol}://{LOCAL_IP}:{port}/{TOKEN}"
+    HOST_VIEW_URL = f"{protocol}://127.0.0.1:{port}/{TOKEN}"
+
+    claimed, existing = claim_single_instance(
+        build_instance_state(port, SECURE, BASE_URL, HOST_VIEW_URL)
+    )
+    if not claimed:
+        running_url = (
+            existing.get("host_url")
+            or existing.get("base_url")
+            or HOST_VIEW_URL
+        )
+        print()
+        print(
+            "  \033[33m\u26a0 LiquidDrop is already running. Opening the existing host view...\033[0m"
+        )
+        if args.new_token:
+            print(
+                "  \033[90mStop the current session before generating a new token.\033[0m"
+            )
+        print(f"  \033[90m{running_url}\033[0m\n")
+        threading.Timer(0.2, lambda: webbrowser.open(running_url)).start()
+        return
 
     if args.new_token:
         TOKEN = load_or_create_token(force_new=True)
 
     PIN_CODE = generate_pin(TOKEN)
-
-    os.system("cls" if os.name == "nt" else "clear")
-    print()
-
-    if SECURE:
-        print("  \033[1;96m\U0001f4a7 LiquidDrop v3.1 \u2014 Secure Mode (HTTPS)\033[0m")
-        print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
-        generate_certificate()
-        BASE_URL = f"https://{LOCAL_IP}:{port}/{TOKEN}"
-    else:
-        print("  \033[1;96m\U0001f4a7 LiquidDrop v3.1\033[0m")
-        print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
-        BASE_URL = f"http://{LOCAL_IP}:{port}/{TOKEN}"
-
-    print("  \033[33m\U0001f4f7 Generating QR code...\033[0m")
-    qr = generate_qr()
-
-    os.system("cls" if os.name == "nt" else "clear")
-    print()
-    if SECURE:
-        print("  \033[1;96m\U0001f4a7 LiquidDrop v3.1 \u2014 Secure Mode (HTTPS)\033[0m")
-    else:
-        print("  \033[1;96m\U0001f4a7 LiquidDrop v3.1\033[0m")
-    print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
-    print_terminal_qr(qr)
-    print()
-    print("  \033[90m" + "\u2500" * 50 + "\033[0m")
-    print(f"  \033[1;97m\U0001f4f1 Scan the QR or open:\033[0m")
-    print(f"  \033[1;92m   {BASE_URL}\033[0m\n")
-
-    protocol = "https" if SECURE else "http"
-    pin_url = f"{protocol}://{LOCAL_IP}:{port}"
-    print(f"  \033[1;97m\U0001f511 Or enter PIN:  \033[1;93m{PIN_CODE}\033[0m")
-    print(f"  \033[90m   at {pin_url}\033[0m\n")
-
-    if SECURE:
-        print(f"  \033[1;32m\U0001f512 HTTPS Enabled \u2014 TLS Encrypted\033[0m")
-        print(f"  \033[90m   Fingerprint: {CERT_FINGERPRINT[:48]}\033[0m")
-        print(f"  \033[90m   {CERT_FINGERPRINT[48:]}\033[0m\n")
-        print(f"  \033[33m   \u26a0  First visit: tap Advanced \u2192 Proceed\033[0m\n")
-    else:
-        print(f"  \033[1;32m\U0001f310 Protected by secret token + WiFi encryption\033[0m")
-        print(
-            f"  \033[90m   Add --secure for full HTTPS/TLS encryption\033[0m\n"
-        )
-
-    print(f"  \033[90mFiles: ~/LiquidDrop  \xb7  Streaming 256KB chunks\033[0m")
-    print(
-        f"  \033[90mURL is stable \u2014 bookmarks & home screen shortcuts persist\033[0m"
+    BASE_URL = f"{protocol}://{LOCAL_IP}:{port}/{TOKEN}"
+    HOST_VIEW_URL = f"{protocol}://127.0.0.1:{port}/{TOKEN}"
+    update_instance_state(
+        token=TOKEN,
+        base_url=BASE_URL,
+        host_url=HOST_VIEW_URL,
+        status="starting",
     )
-    print(f"  \033[90mPress Ctrl+C to stop\033[0m")
-    print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
 
-    with ThreadedServer(("0.0.0.0", port), Handler) as httpd:
+    try:
+        os.system("cls" if os.name == "nt" else "clear")
+        print()
+
         if SECURE:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(CERT_FILE, KEY_FILE)
-            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            print(
+                f"  \033[1;96m\U0001f4a7 LiquidDrop v{APP_VERSION} \u2014 Secure Mode (HTTPS)\033[0m"
+            )
+            print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
+            generate_certificate()
+        else:
+            print(f"  \033[1;96m\U0001f4a7 LiquidDrop v{APP_VERSION}\033[0m")
+            print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
 
-        def shutdown(sig, frame):
-            print("\n  \033[33m\u23f9  Shutting down...\033[0m\n")
-            # shutdown() must be called from a different thread than serve_forever()
-            threading.Thread(target=httpd.shutdown, daemon=True).start()
+        print("  \033[33m\U0001f4a7 Preparing app icon...\033[0m")
+        generate_app_icons()
+        print("  \033[33m\U0001f4f7 Generating QR code...\033[0m")
+        qr = generate_qr()
 
-        signal.signal(signal.SIGINT, shutdown)
-        threading.Timer(0.5, lambda: webbrowser.open(BASE_URL)).start()
-        print(f"  \033[90m\U0001f310 Opening browser...\033[0m\n")
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass
+        os.system("cls" if os.name == "nt" else "clear")
+        print()
+        if SECURE:
+            print(
+                f"  \033[1;96m\U0001f4a7 LiquidDrop v{APP_VERSION} \u2014 Secure Mode (HTTPS)\033[0m"
+            )
+        else:
+            print(f"  \033[1;96m\U0001f4a7 LiquidDrop v{APP_VERSION}\033[0m")
+        print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
+        print_terminal_qr(qr)
+        print()
+        print("  \033[90m" + "\u2500" * 50 + "\033[0m")
+        print(f"  \033[1;97m\U0001f4f1 Scan the QR or open:\033[0m")
+        print(f"  \033[1;92m   {BASE_URL}\033[0m\n")
+
+        pin_url = f"{protocol}://{LOCAL_IP}:{port}"
+        print(f"  \033[1;97m\U0001f511 Or enter PIN:  \033[1;93m{PIN_CODE}\033[0m")
+        print(f"  \033[90m   at {pin_url}\033[0m\n")
+
+        if SECURE:
+            print(f"  \033[1;32m\U0001f512 HTTPS Enabled \u2014 TLS Encrypted\033[0m")
+            print(f"  \033[90m   Fingerprint: {CERT_FINGERPRINT[:48]}\033[0m")
+            print(f"  \033[90m   {CERT_FINGERPRINT[48:]}\033[0m\n")
+            print(f"  \033[33m   \u26a0  First visit: tap Advanced \u2192 Proceed\033[0m\n")
+        else:
+            print(
+                f"  \033[1;32m\U0001f310 Protected by secret token + WiFi encryption\033[0m"
+            )
+            print(
+                f"  \033[90m   Add --secure for full HTTPS/TLS encryption\033[0m\n"
+            )
+
+        print(f"  \033[90mFiles: ~/LiquidDrop  \xb7  Streaming 256KB chunks\033[0m")
+        print(
+            "  \033[90mThe host browser includes a clear stop button for ending the session.\033[0m"
+        )
+        print(
+            f"  \033[90mURL is stable \u2014 bookmarks & home screen shortcuts persist\033[0m"
+        )
+        print("  \033[90m" + "\u2500" * 50 + "\033[0m\n")
+
+        with ThreadedServer(("0.0.0.0", port), Handler) as httpd:
+            if SECURE:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(CERT_FILE, KEY_FILE)
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+
+            def shutdown(sig, frame):
+                print("\n  \033[33m\u23f9  Shutting down...\033[0m\n")
+                httpd.initiate_shutdown()
+
+            signal.signal(signal.SIGINT, shutdown)
+            threading.Timer(0.5, lambda: webbrowser.open(HOST_VIEW_URL)).start()
+            print(f"  \033[90m\U0001f310 Opening browser...\033[0m\n")
+            update_instance_state(status="running")
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                pass
+    finally:
+        release_instance()
 
 
 if __name__ == "__main__":
