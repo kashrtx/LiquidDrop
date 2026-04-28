@@ -15,6 +15,16 @@
 
 One Python file. No accounts. No cloud. No install on the receiving device. Run it, scan the QR (or enter the PIN), transfer files.
 
+## Screenshots
+
+<p align="center">
+  <img src="assets/readme/host.png" alt="LiquidDrop desktop host view" width="78%">
+</p>
+
+<p align="center">
+  <img src="assets/readme/phone.png" alt="LiquidDrop mobile view" width="32%">
+</p>
+
 ## Why
 
 Every other file transfer tool wants you to install an app on both devices. LiquidDrop doesn't. Someone walks up to your desk, scans a QR code with their phone camera, and they're sending files. Done.
@@ -145,7 +155,7 @@ liquiddrop/
 └── LICENSE
 ```
 
-One file. That's the point.
+The app code is still one file. That's the point.
 
 ## License
 
