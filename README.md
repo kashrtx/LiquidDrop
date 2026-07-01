@@ -46,6 +46,8 @@ Every other file transfer tool wants you to install an app on both devices. Liqu
 - Drag and drop on desktop, tap to pick on mobile
 - **Host stop control** — the desktop host view includes a clear stop button to shut down the session without using the terminal
 - **Desktop-optimized layout** — wide screens use a cleaner multi-panel layout while the phone view stays unchanged
+- **Extensions tab** - install, uninstall, enable, disable, and configure LiquidDrop add-ons from the host view
+- **Bundled add-ons** - custom backgrounds, document/media preview with zoom/audio visualization, and a configurable status strip
 - 3+ files? Offers to zip them into one bundle
 - Live upload speed and ETA
 - Streams files in 256KB chunks, so a 10GB file uses the same memory as a 10KB file
@@ -143,6 +145,12 @@ The `--secure` flag will show a one-time browser warning because the cert is sel
 
 No accounts. No analytics. No telemetry. No external calls.
 
+## Extensions and Mods
+
+Open the **Extensions** tab in the host web view to manage add-ons. LiquidDrop includes bundled extensions for custom image/GIF backgrounds, an in-page document/media preview player with zoom, iPhone-friendly PDF/document scrolling, DOCX/text support, calmer audio visualization, and a configurable modern status widget strip for devices, weather, and transfer speed.
+
+User extensions live in `~/LiquidDrop/extensions/<extension-id>/` with a `manifest.json` and optional `client.js`/`style.css`. See [EXTENSIONS.md](EXTENSIONS.md) for the manifest format, client API, one-file install example, and testing checklist.
+
 ## Config
 
 Edit the top of `liquiddrop.py`:
@@ -156,12 +164,14 @@ UPLOAD_DIR = "~/LiquidDrop"  # change where files go
 
 ```
 liquiddrop/
-├── liquiddrop.py    # everything
-├── README.md
-└── LICENSE
+|-- liquiddrop.py       # core app and extension runtime
+|-- assets/extensions/  # bundled extensions
+|-- EXTENSIONS.md       # extension authoring guide
+|-- README.md
+`-- LICENSE
 ```
 
-The app code is just one file. That's the point.
+The core app is still one Python file. Bundled extensions are plain manifest/script folders so users can copy them as examples.
 
 ## License
 

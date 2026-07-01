@@ -1,0 +1,24 @@
+{
+  "id": "liquiddrop.background",
+  "name": "Background Studio",
+  "version": "1.1.0",
+  "description": "Use a picture or GIF as the LiquidDrop background while preserving readable glass panels and contrast.",
+  "author": "LiquidDrop",
+  "category": "Appearance",
+  "default_enabled": true,
+  "capabilities": ["Backgrounds", "Accessibility"],
+  "client": {"script": "client.js"},
+  "settings_schema": [
+    {"key": "backgroundUrl", "name_key": "backgroundName", "label": "Image or GIF", "type": "asset", "accept": "image/*,.gif", "default": "", "help": "Choose the background media used behind LiquidDrop."},
+    {"key": "overlayOpacity", "label": "Readability veil", "type": "number", "default": 0.72, "min": 0.35, "max": 0.92, "step": 0.01, "help": "Higher values make text easier to read over bright images."},
+    {"key": "blur", "label": "Background blur", "type": "number", "default": 12, "min": 0, "max": 32, "step": 1, "help": "Softens busy photos and animated GIFs behind the UI."},
+    {"key": "tint", "label": "Tint color", "type": "color", "default": "#050816", "help": "Color used for the readability veil."}
+  ],
+  "settings_defaults": {
+    "backgroundUrl": "",
+    "backgroundName": "",
+    "overlayOpacity": 0.72,
+    "blur": 12,
+    "tint": "#050816"
+  }
+}

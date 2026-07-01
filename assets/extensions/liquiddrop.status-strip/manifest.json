@@ -1,0 +1,31 @@
+{
+  "id": "liquiddrop.status-strip",
+  "name": "Status Strip",
+  "version": "1.1.1",
+  "description": "Adds modern icon status widgets for connected devices, local transfer speed, and no-signup weather.",
+  "author": "LiquidDrop",
+  "category": "Dashboard",
+  "default_enabled": true,
+  "capabilities": ["Devices", "Weather", "Speed"],
+  "client": {"script": "client.js"},
+  "settings_schema": [
+    {"key": "showDevices", "label": "Show connected devices", "type": "boolean", "default": true},
+    {"key": "showTransfer", "label": "Show transfer speed", "type": "boolean", "default": true},
+    {"key": "showWeather", "label": "Show weather", "type": "boolean", "default": true},
+    {"key": "weatherMode", "label": "Weather location", "type": "select", "default": "browser", "options": [{"value": "browser", "label": "Ask browser location"}, {"value": "manual", "label": "Manual coordinates"}, {"value": "off", "label": "Off"}]},
+    {"key": "latitude", "label": "Manual latitude", "type": "number", "default": 0, "min": -90, "max": 90, "step": 0.0001},
+    {"key": "longitude", "label": "Manual longitude", "type": "number", "default": 0, "min": -180, "max": 180, "step": 0.0001},
+    {"key": "temperatureUnit", "label": "Temperature unit", "type": "select", "default": "fahrenheit", "options": [{"value": "fahrenheit", "label": "Fahrenheit"}, {"value": "celsius", "label": "Celsius"}]},
+    {"key": "accentColor", "label": "Accent color", "type": "color", "default": "#6ee7b7"}
+  ],
+  "settings_defaults": {
+    "showDevices": true,
+    "showTransfer": true,
+    "showWeather": true,
+    "weatherMode": "browser",
+    "latitude": 0,
+    "longitude": 0,
+    "temperatureUnit": "fahrenheit",
+    "accentColor": "#6ee7b7"
+  }
+}
