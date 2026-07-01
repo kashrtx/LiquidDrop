@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/python-3.7+-blue?style=flat-square&logo=python&logoColor=white">
   <img src="https://img.shields.io/badge/dependencies-auto--installed-green?style=flat-square">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square">
-  <img src="https://img.shields.io/badge/license-MIT-purple?style=flat-square">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-purple?style=flat-square">
 </p>
 
 ---
@@ -175,7 +175,7 @@ The core app is still one Python file. Bundled extensions are plain manifest/scr
 
 ## License
 
-MIT. Do whatever you want with it.
+Apache 2.0. See the LICENSE file for details.
 
 ---
 
