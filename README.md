@@ -46,8 +46,9 @@ Every other file transfer tool wants you to install an app on both devices. Liqu
 - Drag and drop on desktop, tap to pick on mobile
 - **Host stop control** — the desktop host view includes a clear stop button to shut down the session without using the terminal
 - **Desktop-optimized layout** — wide screens use a cleaner multi-panel layout while the phone view stays unchanged
-- **Extensions tab** - install, uninstall, enable, disable, and configure LiquidDrop add-ons from the host view
-- **Bundled add-ons** - custom backgrounds, document/media preview with zoom/audio visualization, and a configurable status strip
+- **Extensions tab** - create starter add-ons, open the add-on folder, install JSON add-ons, and manage host-only settings
+- **Add-on framework** - owner/date metadata, manifest diagnostics, load/error status, validated paths, and host-synced shared state across connected devices
+- **Bundled add-ons** - custom backgrounds, document/media preview with zoom/audio visualization, and a configurable status strip with host-synced weather
 - 3+ files? Offers to zip them into one bundle
 - Live upload speed and ETA
 - Streams files in 256KB chunks, so a 10GB file uses the same memory as a 10KB file
@@ -147,9 +148,11 @@ No accounts. No analytics. No telemetry. No external calls.
 
 ## Extensions and Mods
 
-Open the **Extensions** tab in the host web view to manage add-ons. LiquidDrop includes bundled extensions for custom image/GIF backgrounds, an in-page document/media preview player with zoom, iPhone-friendly PDF/document scrolling, DOCX/text support, calmer audio visualization, and a configurable modern status widget strip for devices, weather, and transfer speed.
+Open the **Extensions** tab in the host web view to manage add-ons. Host users can create a starter add-on, open the add-on folder, install JSON add-ons, toggle add-ons, and configure settings that sync to connected devices. Mobile users can run enabled add-ons but cannot change add-on management settings.
 
-User extensions live in `~/LiquidDrop/extensions/<extension-id>/` with a `manifest.json` and optional `client.js`/`style.css`. See [EXTENSIONS.md](EXTENSIONS.md) for the manifest format, client API, one-file install example, and testing checklist.
+LiquidDrop includes bundled extensions for custom image/GIF backgrounds, an in-page document/media preview player with zoom, iPhone-friendly PDF/document scrolling, DOCX/text support, calmer audio visualization, and a configurable modern status widget strip for devices, transfer speed, and host-synced weather.
+
+User add-ons live in `~/LiquidDrop/extensions/<extension-id>/` with a `manifest.json` and optional `client.js`/`style.css`. See [EXTENSIONS.md](EXTENSIONS.md) for the create flow, manifest format, shared-state API, one-file install example, safety model, and testing checklist.
 
 ## Config
 

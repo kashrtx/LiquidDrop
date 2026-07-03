@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════╗
-║          💧 LiquidDrop v4.0                  ║
+║          💧 LiquidDrop v4.1                  ║
 ║   Beautiful Local File Transfer              ║
 ║                                              ║
 ║   python3 liquiddrop.py              (HTTP)  ║
@@ -17,7 +17,7 @@ import webbrowser, threading, ssl, hashlib, argparse, time
 from pathlib import Path, PurePosixPath
 from datetime import datetime, timedelta, timezone
 
-APP_VERSION = "4.0"
+APP_VERSION = "4.1"
 PORT = 7777
 UPLOAD_DIR = os.path.join(os.path.expanduser("~"), "LiquidDrop")
 CERT_DIR = os.path.join(UPLOAD_DIR, ".certs")
@@ -30,6 +30,7 @@ BUNDLED_EXTENSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__))
 CHUNK = 256 * 1024
 MAX_JSON_BODY = 512 * 1024
 MAX_EXTENSION_ASSET = 64 * 1024 * 1024
+MAX_EXTENSION_SHARED_STATE = 256 * 1024
 MAX_DOCUMENT_PREVIEW = 2 * 1024 * 1024
 SECURE = False
 PIN_CODE = ""
@@ -289,6 +290,40 @@ def _plain_string(value, default="", max_len=240):
     return value[:max_len]
 
 
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _iso_from_timestamp(ts):
+    try:
+        return datetime.fromtimestamp(float(ts), timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _extension_root_times(root):
+    root = Path(root)
+    created = None
+    updated = None
+    try:
+        for fpath in root.rglob("*"):
+            if not fpath.is_file():
+                continue
+            stat = fpath.stat()
+            created = stat.st_ctime if created is None else min(created, stat.st_ctime)
+            updated = stat.st_mtime if updated is None else max(updated, stat.st_mtime)
+    except OSError:
+        pass
+    if created is None or updated is None:
+        try:
+            stat = root.stat()
+            created = created if created is not None else stat.st_ctime
+            updated = updated if updated is not None else stat.st_mtime
+        except OSError:
+            pass
+    return _iso_from_timestamp(created), _iso_from_timestamp(updated)
+
+
 def _normalize_setting_schema(schema):
     if not isinstance(schema, list):
         return []
@@ -358,6 +393,9 @@ def _normalize_manifest(data):
         "version": _plain_string(data.get("version"), "1.0.0", 32),
         "description": _plain_string(data.get("description"), "", 300),
         "author": _plain_string(data.get("author"), "", 80),
+        "created_at": _plain_string(data.get("created_at"), "", 40),
+        "updated_at": _plain_string(data.get("updated_at"), "", 40),
+        "license": _plain_string(data.get("license"), "Creator retains rights", 120),
         "category": _plain_string(data.get("category"), "Utility", 40),
         "default_enabled": bool(data.get("default_enabled", True)),
         "capabilities": [
@@ -455,22 +493,34 @@ def _iter_extension_roots(base_dir):
     return roots
 
 
-def _discover_extension_sources():
+def _discover_extension_sources(include_errors=False):
     sources = []
+    errors = []
     seen = set()
     for source_type, base in (("bundled", BUNDLED_EXTENSIONS_DIR), ("user", EXTENSIONS_DIR)):
         for root in _iter_extension_roots(base):
+            err_base = {
+                "id": root.name.lower() or "invalid-extension",
+                "name": root.name or "Invalid extension",
+                "type": source_type,
+                "root": root,
+            }
             try:
                 manifest = _read_extension_manifest(root)
             except ValueError as e:
                 print(f"  \033[33mExtension skipped:\033[0m {root} ({e})")
+                errors.append({**err_base, "error": str(e)})
                 continue
             ext_id = manifest["id"]
             if ext_id in seen:
-                print(f"  \033[33mExtension skipped:\033[0m duplicate id {ext_id}")
+                msg = f"Duplicate extension id: {ext_id}"
+                print(f"  \033[33mExtension skipped:\033[0m {msg}")
+                errors.append({**err_base, "id": ext_id, "name": manifest.get("name") or ext_id, "error": msg})
                 continue
             seen.add(ext_id)
             sources.append({"type": source_type, "root": root, "manifest": manifest})
+    if include_errors:
+        return sources, errors
     return sources
 
 
@@ -493,6 +543,8 @@ def _ensure_extension_state_for_sources(sources):
                 "installed": True,
                 "enabled": bool(manifest.get("default_enabled", True)) if source["type"] == "bundled" else False,
                 "settings": defaults,
+                "shared_state": {},
+                "shared_state_updated_at": "",
             }
             changed = True
         else:
@@ -512,6 +564,12 @@ def _ensure_extension_state_for_sources(sources):
                 if merged != entry["settings"]:
                     entry["settings"] = merged
                     changed = True
+            if not isinstance(entry.get("shared_state"), dict):
+                entry["shared_state"] = {}
+                changed = True
+            if "shared_state_updated_at" not in entry:
+                entry["shared_state_updated_at"] = ""
+                changed = True
     if changed:
         _save_extension_state(state)
     return state
@@ -521,8 +579,92 @@ def _extension_asset_url(ext_id, rel):
     return f"/{TOKEN}/extension-assets/{urllib.parse.quote(ext_id)}/{urllib.parse.quote(rel)}"
 
 
+def _extension_source_file_exists(source, rel):
+    rel = _safe_extension_relpath(rel)
+    if not rel:
+        return False
+    root = Path(source["root"]).resolve()
+    fpath = (root / Path(*PurePosixPath(rel).parts)).resolve()
+    try:
+        fpath.relative_to(root)
+    except ValueError:
+        return False
+    return fpath.is_file()
+
+
+def _extension_health(source, entry):
+    manifest = source["manifest"]
+    installed = bool(entry.get("installed", True))
+    enabled = bool(entry.get("enabled", False)) and installed
+    messages = []
+    status = "ready"
+    label = "Ready"
+    if not installed:
+        status = "not_installed"
+        label = "Not installed"
+    elif not enabled:
+        status = "disabled"
+        label = "Disabled"
+    else:
+        client = manifest.get("client", {})
+        if client.get("script") and not _extension_source_file_exists(source, client.get("script")):
+            messages.append(f"Missing client script: {client.get('script')}")
+        if client.get("style") and not _extension_source_file_exists(source, client.get("style")):
+            messages.append(f"Missing stylesheet: {client.get('style')}")
+        if not client.get("script") and not client.get("style"):
+            messages.append("No client script or stylesheet is declared.")
+        if messages:
+            status = "error"
+            label = "Load error"
+    if source["type"] == "bundled":
+        safety = {"level": "trusted", "label": "Bundled", "messages": ["Shipped with LiquidDrop."]}
+    else:
+        safety = {
+            "level": "validated",
+            "label": "Manifest validated",
+            "messages": ["Paths are sandboxed to this add-on folder. Review the JavaScript before enabling community code."],
+        }
+    return {
+        "status": status,
+        "label": label,
+        "safe": status != "error",
+        "messages": messages,
+        "safety": safety,
+    }
+
+
+def _invalid_extension_entry(error, can_manage=False):
+    created_at, updated_at = _extension_root_times(error.get("root"))
+    return {
+        "id": error.get("id") or "invalid-extension",
+        "name": error.get("name") or "Invalid extension",
+        "version": "",
+        "description": "LiquidDrop could not load this manifest.",
+        "author": "",
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "license": "",
+        "category": "Invalid",
+        "capabilities": [],
+        "builtin": error.get("type") == "bundled",
+        "installed": False,
+        "enabled": False,
+        "settings_schema": [],
+        "settings": {},
+        "client": {},
+        "path": str(error.get("root")) if can_manage and error.get("root") else "",
+        "health": {
+            "status": "error",
+            "label": "Manifest error",
+            "safe": False,
+            "messages": [error.get("error") or "Invalid manifest."],
+            "safety": {"level": "blocked", "label": "Blocked", "messages": ["LiquidDrop skipped this add-on before loading any code."]},
+        },
+    }
+
+
 def get_extensions_for_api(can_manage=False):
-    sources = _discover_extension_sources()
+    sources, errors = _discover_extension_sources(include_errors=True)
     state = _ensure_extension_state_for_sources(sources)
     extensions = []
     for source in sources:
@@ -536,6 +678,9 @@ def get_extensions_for_api(can_manage=False):
             {},
             entry.get("settings") if isinstance(entry.get("settings"), dict) else {},
         )
+        created_at, updated_at = _extension_root_times(source["root"])
+        created_at = manifest.get("created_at") or created_at
+        updated_at = manifest.get("updated_at") or updated_at
         client = {}
         if installed and enabled:
             if manifest.get("client", {}).get("script"):
@@ -549,6 +694,9 @@ def get_extensions_for_api(can_manage=False):
                 "version": manifest["version"],
                 "description": manifest["description"],
                 "author": manifest["author"],
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "license": manifest.get("license", "Creator retains rights"),
                 "category": manifest["category"],
                 "capabilities": manifest.get("capabilities", []),
                 "builtin": source["type"] == "bundled",
@@ -557,8 +705,11 @@ def get_extensions_for_api(can_manage=False):
                 "settings_schema": manifest.get("settings_schema", []),
                 "settings": settings if can_manage else {},
                 "client": client,
+                "path": str(source["root"]) if can_manage else "",
+                "health": _extension_health(source, entry),
             }
         )
+    extensions.extend(_invalid_extension_entry(e, can_manage) for e in errors)
     return {
         "can_manage": can_manage,
         "developer_dir": EXTENSIONS_DIR,
@@ -601,9 +752,173 @@ def _save_extension_settings(ext_id, incoming):
     return entry["settings"]
 
 
+def _coerce_extension_shared_state(value):
+    if not isinstance(value, dict):
+        raise ValueError("Shared extension state must be a JSON object.")
+    try:
+        body = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    except (TypeError, ValueError):
+        raise ValueError("Shared extension state must be JSON serializable.")
+    if len(body) > MAX_EXTENSION_SHARED_STATE:
+        raise ValueError("Shared extension state is too large.")
+    return value
+
+
+def _extension_shared_state(ext_id):
+    source = _find_extension_source(ext_id)
+    if not source:
+        raise ValueError("Extension not found.")
+    state = _ensure_extension_state_for_sources(_discover_extension_sources())
+    entry = state.get(ext_id, {})
+    shared = entry.get("shared_state") if isinstance(entry.get("shared_state"), dict) else {}
+    return {
+        "state": shared,
+        "updated_at": entry.get("shared_state_updated_at", ""),
+    }
+
+
+def _save_extension_shared_state(ext_id, incoming):
+    source = _find_extension_source(ext_id)
+    if not source:
+        raise ValueError("Extension not found.")
+    shared = _coerce_extension_shared_state(incoming)
+    state = _ensure_extension_state_for_sources(_discover_extension_sources())
+    entry = state.setdefault(ext_id, {})
+    entry["shared_state"] = shared
+    entry["shared_state_updated_at"] = _utc_now_iso()
+    _save_extension_state(state)
+    return {"state": shared, "updated_at": entry["shared_state_updated_at"]}
+
+
+def _extension_id_from_name(name):
+    slug = re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-._")
+    if not slug:
+        slug = "addon"
+    base = f"community.{slug}"
+    base = base[:64].rstrip(".-_")
+    return base if _valid_extension_id(base) else "community.addon"
+
+
+def _unique_extension_id(base_id):
+    base_id = _plain_string(base_id, max_len=64).lower().rstrip(".-_")
+    if not _valid_extension_id(base_id):
+        base_id = "community.addon"
+    existing_ids = {source["manifest"]["id"] for source in _discover_extension_sources()}
+    candidate = base_id
+    n = 2
+    while candidate in existing_ids or (Path(EXTENSIONS_DIR) / candidate).exists():
+        suffix = f"-{n}"
+        candidate = (base_id[: 64 - len(suffix)].rstrip(".-_") + suffix)
+        n += 1
+    return candidate
+
+
+def _starter_extension_script(ext_id):
+    return """(function () {
+  const id = '__EXT_ID__';
+  const api = window.LiquidDropExtensions;
+  if (!api) return;
+
+  function addBanner(message, color) {
+    let banner = document.querySelector('[data-addon="' + id + '"]');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.dataset.addon = id;
+      banner.style.cssText = 'margin:12px 0;padding:12px 14px;border-radius:14px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);font-weight:800;color:#fff;';
+      const header = document.querySelector('.app-header') || document.body;
+      header.appendChild(banner);
+    }
+    banner.textContent = message;
+    banner.style.borderColor = color || 'rgba(110,231,183,.28)';
+  }
+
+  async function start() {
+    const settings = await api.getSettings(id);
+    addBanner(settings.message || 'Hello from my LiquidDrop add-on.', settings.accentColor);
+
+    const shared = await api.getSharedState(id);
+    if (api.canManage()) {
+      await api.setSharedState(id, {
+        lastHostUpdate: new Date().toISOString(),
+        visits: Number(shared.visits || 0) + 1
+      });
+    }
+  }
+
+  start().catch((error) => api.reportError(id, error));
+})();
+""".replace("__EXT_ID__", ext_id)
+
+
+def _create_extension_scaffold(data):
+    if not isinstance(data, dict):
+        data = {}
+    name = _plain_string(data.get("name"), "My LiquidDrop Add-on", 80)
+    requested_id = _plain_string(data.get("id"), "", 64).lower()
+    ext_id = _unique_extension_id(requested_id if _valid_extension_id(requested_id) else _extension_id_from_name(name))
+    author_default = os.environ.get("USERNAME") or os.environ.get("USER") or "Community Creator"
+    author = _plain_string(data.get("author"), author_default, 80)
+    description = _plain_string(data.get("description"), "A community add-on created with the LiquidDrop starter.", 300)
+    now = _utc_now_iso()
+    dest = Path(EXTENSIONS_DIR) / ext_id
+    if dest.exists():
+        raise ValueError("Extension folder already exists.")
+    os.makedirs(dest, exist_ok=False)
+    manifest = {
+        "id": ext_id,
+        "name": name,
+        "version": "0.1.0",
+        "description": description,
+        "author": author,
+        "created_at": now,
+        "updated_at": now,
+        "license": "Creator retains rights",
+        "category": "Community",
+        "default_enabled": False,
+        "capabilities": ["Starter", "Cross-device state"],
+        "client": {"script": "client.js"},
+        "settings_schema": [
+            {"key": "message", "label": "Message", "type": "string", "default": "Hello from my LiquidDrop add-on", "help": "Text shown by the starter add-on."},
+            {"key": "accentColor", "label": "Accent color", "type": "color", "default": "#6ee7b7", "help": "Border color used by the starter add-on."},
+        ],
+        "settings_defaults": {
+            "message": "Hello from my LiquidDrop add-on",
+            "accentColor": "#6ee7b7",
+        },
+    }
+    _write_json_file(dest / "manifest.json", manifest)
+    (dest / "client.js").write_text(_starter_extension_script(ext_id), encoding="utf-8")
+    state = _load_extension_state()
+    state[ext_id] = {
+        "installed": True,
+        "enabled": False,
+        "settings": _manifest_defaults(manifest),
+        "shared_state": {},
+        "shared_state_updated_at": "",
+    }
+    _save_extension_state(state)
+    return manifest, str(dest)
+
+
+def _open_extensions_folder():
+    os.makedirs(EXTENSIONS_DIR, exist_ok=True)
+    if os.name == "nt":
+        os.startfile(EXTENSIONS_DIR)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", EXTENSIONS_DIR], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.Popen(["xdg-open", EXTENSIONS_DIR], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return EXTENSIONS_DIR
+
+
 def _install_extension_manifest(data):
     inline_js = ""
     inline_css = ""
+    if isinstance(data, dict):
+        now = _utc_now_iso()
+        data.setdefault("created_at", now)
+        data.setdefault("updated_at", now)
+        data.setdefault("license", "Creator retains rights")
     if isinstance(data, dict) and isinstance(data.get("client"), dict):
         inline_js = data["client"].pop("inline_js", "") or ""
         inline_css = data["client"].pop("inline_css", "") or ""
@@ -1462,6 +1777,7 @@ body{
 .extension-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
 .extension-empty{padding:26px 16px;text-align:center;color:var(--text2);font-size:13px;border:1px dashed var(--glass-border);border-radius:18px}
 .extension-note{font-size:11px;color:var(--text2);line-height:1.5;padding:12px 14px;border-radius:16px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.16)}
+.extension-submeta{font-size:11px;color:var(--text2);line-height:1.45;display:flex;flex-wrap:wrap;gap:6px;margin-top:-4px}.extension-diagnostics{font-size:11px;line-height:1.45;padding:10px 12px;border-radius:14px;background:rgba(110,231,183,0.07);border:1px solid rgba(110,231,183,0.14);color:rgba(255,255,255,0.76)}.extension-diagnostics.error{background:rgba(248,113,113,0.1);border-color:rgba(248,113,113,0.22);color:rgba(255,205,205,0.94)}
 .extension-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.62);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);z-index:980;display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;pointer-events:none;transition:opacity .3s ease}
 .extension-modal-overlay.show{opacity:1;pointer-events:auto}
 .extension-modal{max-width:480px;width:100%;max-height:min(86vh,720px);overflow:auto;padding:22px;text-align:left;transform:scale(0.94) translateY(10px);transition:transform .3s ease}
@@ -1809,6 +2125,8 @@ body{
     </div>
     <div class="extension-toolbar">
       <button class="ext-btn" id="refreshExtensionsBtn" type="button">Refresh</button>
+      <button class="ext-btn" id="openExtensionsFolderBtn" type="button">Open Folder</button>
+      <button class="ext-btn" id="createExtensionBtn" type="button">Create Add-on</button>
       <button class="ext-btn primary" id="installExtensionBtn" type="button">Install JSON</button>
       <input type="file" id="extensionFileInput" accept=".json,.liquiddrop-extension,application/json" hidden>
     </div>
@@ -1853,6 +2171,23 @@ body{
       <button class="ext-btn danger" id="extensionConfigReset" type="button">Reset Defaults</button>
       <button class="ext-btn" id="extensionConfigCancel" type="button">Cancel</button>
       <button class="ext-btn primary" id="extensionConfigSave" type="button">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<div class="extension-modal-overlay" id="extensionCreateOverlay">
+  <div class="extension-modal glass">
+    <h3>Create Add-on</h3>
+    <p>Generate a safe starter folder with a manifest, settings, and cross-device shared state.</p>
+    <form class="extension-form" id="extensionCreateForm">
+      <div class="extension-field"><label>Name</label><input type="text" name="name" id="extensionCreateName" value="My LiquidDrop Add-on" maxlength="80"></div>
+      <div class="extension-field"><label>ID</label><input type="text" name="id" id="extensionCreateId" value="community.my-addon" maxlength="64"><small>Lowercase letters, numbers, dots, dashes, and underscores.</small></div>
+      <div class="extension-field"><label>Creator</label><input type="text" name="author" id="extensionCreateAuthor" value="" maxlength="80"></div>
+      <div class="extension-field"><label>Description</label><textarea name="description" id="extensionCreateDescription">A community add-on created with the LiquidDrop starter.</textarea></div>
+    </form>
+    <div class="extension-modal-actions">
+      <button class="ext-btn" id="extensionCreateCancel" type="button">Cancel</button>
+      <button class="ext-btn primary" id="extensionCreateSave" type="button">Create Starter</button>
     </div>
   </div>
 </div>
@@ -2329,7 +2664,10 @@ function toast(m,t='success'){
 /* ===== Extension manager and runtime ===== */
 let extensionPayload={extensions:[],can_manage:false,developer_dir:''};
 let extensionConfigId=null;
+let extensionCreateIdTouched=false;
 const loadedExtensionAssets=new Set();
+const extensionRuntimeState={};
+const extensionAssetToId=new Map();
 
 function escAttr(s){return esc(String(s)).replace(/'/g,'&#39;');}
 
@@ -2348,9 +2686,41 @@ document.querySelectorAll('#appTabs .tab-btn').forEach(btn=>{
   btn.addEventListener('click',()=>switchAppTab(btn.dataset.tab));
 });
 
+function markExtensionRuntime(id,status,message){
+  if(!id) return;
+  extensionRuntimeState[id]={status,message:message||'',at:new Date().toISOString()};
+  if((extensionPayload.extensions||[]).length) renderExtensions();
+}
+
+function rememberExtensionAsset(url,id){
+  if(!url||!id) return;
+  extensionAssetToId.set(url,id);
+  try{extensionAssetToId.set(new URL(url,location.href).href,id);}catch(e){}
+}
+
+function extensionIdForSource(src){
+  src=String(src||'');
+  if(!src) return '';
+  for(const [url,id] of extensionAssetToId.entries()){
+    if(src===url||src.endsWith(url)) return id;
+  }
+  return '';
+}
+
+window.addEventListener('error',e=>{
+  const id=extensionIdForSource(e.filename||'');
+  if(id){
+    const bits=[];
+    if(e.message) bits.push(e.message);
+    if(e.lineno) bits.push('line '+e.lineno+(e.colno?':'+e.colno:''));
+    markExtensionRuntime(id,'error',bits.join(' at ')||'Script error');
+  }
+},true);
+
 window.LiquidDropExtensions={
   version:'1.0.0',
   apiBase:API,
+  canManage(){return !!extensionPayload.can_manage;},
   registerPanel(){return null;},
   unregisterPanel(){},
   async getSettings(id){
@@ -2366,6 +2736,20 @@ window.LiquidDropExtensions={
     if(!r.ok) throw new Error('Save settings failed: '+r.status);
     const data=await r.json();
     return data.settings||{};
+  },
+  async getSharedState(id){
+    const r=await fetch(API+'/extensions/'+encodeURIComponent(id)+'/state',{cache:'no-store'});
+    if(!r.ok) throw new Error('Shared state failed: '+r.status);
+    const data=await r.json();
+    return data.state||{};
+  },
+  async setSharedState(id,state){
+    const r=await fetch(API+'/extensions/'+encodeURIComponent(id)+'/state',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:state||{}})
+    });
+    if(!r.ok) throw new Error('Save shared state failed: '+r.status);
+    const data=await r.json();
+    return data.state||{};
   },
   async uploadAsset(id,file){
     const fd=new FormData();fd.append('file',file);
@@ -2385,6 +2769,11 @@ window.LiquidDropExtensions={
     return await r.json();
   },
   getSelectedFiles(){return [...selectedFiles];},
+  reportError(id,error){
+    const message=(error&&error.message)?error.message:String(error||'Unknown add-on error');
+    markExtensionRuntime(id,'error',message);
+    try{console.error('LiquidDrop extension error:',id,error);}catch(e){}
+  },
   toast,
   escapeHtml:esc,
   formatSize:fmtSize
@@ -2406,19 +2795,59 @@ function loadEnabledExtensionAssets(exts){
   exts.filter(e=>e.installed&&e.enabled&&e.client).forEach(ext=>{
     if(ext.client.style_url&&!loadedExtensionAssets.has(ext.client.style_url)){
       loadedExtensionAssets.add(ext.client.style_url);
+      rememberExtensionAsset(ext.client.style_url,ext.id);
       const link=document.createElement('link');
       link.rel='stylesheet';link.href=ext.client.style_url;
+      link.onerror=()=>markExtensionRuntime(ext.id,'error','Stylesheet failed to load');
       document.head.appendChild(link);
     }
     if(ext.client.script_url&&!loadedExtensionAssets.has(ext.client.script_url)){
       loadedExtensionAssets.add(ext.client.script_url);
+      rememberExtensionAsset(ext.client.script_url,ext.id);
+      markExtensionRuntime(ext.id,'loading','Loading client script');
       const script=document.createElement('script');
       script.src=ext.client.script_url;
       script.defer=true;
-      script.onerror=()=>toast('Extension failed: '+ext.name,'error');
+      script.onload=()=>{
+        const current=extensionRuntimeState[ext.id];
+        if(!current||current.status!=='error') markExtensionRuntime(ext.id,'loaded','Client script loaded');
+      };
+      script.onerror=()=>{
+        markExtensionRuntime(ext.id,'error','Client script failed to load');
+        toast('Extension failed: '+ext.name,'error');
+      };
       document.body.appendChild(script);
     }
   });
+}
+
+function shortDate(value){
+  if(!value) return '';
+  const d=new Date(value);
+  if(Number.isNaN(d.getTime())) return String(value).slice(0,10);
+  return d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
+}
+
+function extensionStatusBadge(ext){
+  const health=ext.health||{};
+  const runtime=extensionRuntimeState[ext.id]||{};
+  if(runtime.status==='error'||health.status==='error') return '<span class="extension-badge warn">Error</span>';
+  if(runtime.status==='loading') return '<span class="extension-badge warn">Loading</span>';
+  if(runtime.status==='loaded') return '<span class="extension-badge on">Loaded</span>';
+  if(ext.installed&&ext.enabled) return '<span class="extension-badge on">Ready</span>';
+  return ext.installed?'<span class="extension-badge off">Off</span>':'<span class="extension-badge off">Not installed</span>';
+}
+
+function extensionDiagnostics(ext){
+  const health=ext.health||{};
+  const runtime=extensionRuntimeState[ext.id]||{};
+  const messages=[];
+  (health.messages||[]).forEach(m=>messages.push(m));
+  if(runtime.status==='error'&&runtime.message) messages.push(runtime.message);
+  if(!messages.length&&health.safety&&health.safety.messages&&health.safety.messages[0]) messages.push(health.safety.messages[0]);
+  if(!messages.length) return '';
+  const cls=(runtime.status==='error'||health.status==='error')?' extension-diagnostics error':' extension-diagnostics';
+  return '<div class="'+cls.trim()+'">'+messages.map(esc).join('<br>')+'</div>';
 }
 
 function renderExtensions(){
@@ -2426,26 +2855,40 @@ function renderExtensions(){
   const exts=extensionPayload.extensions||[];
   const canManage=!!extensionPayload.can_manage;
   $('#installExtensionBtn').disabled=!canManage;
+  $('#createExtensionBtn').disabled=!canManage;
+  $('#openExtensionsFolderBtn').disabled=!canManage;
   $('#extensionTrustNote').textContent=canManage
-    ? 'Extensions can run JavaScript in LiquidDrop. Install only code you trust.'
-    : 'Extension management is available only from the host computer.';
+    ? 'Create starter add-ons, open the add-on folder, install trusted JSON files, and manage settings that sync across devices.'
+    : 'Extension management is available only from the host computer. Enabled add-ons and shared state still sync to this device.';
   if(!exts.length){
     list.innerHTML='<div class="extension-empty">No extensions found. Add one in '+esc(extensionPayload.developer_dir||'~/LiquidDrop/extensions')+'.</div>';
     return;
   }
   list.innerHTML=exts.map(ext=>{
-    const installed=!!ext.installed,enabled=!!ext.enabled;
+    const installed=!!ext.installed,enabled=!!ext.enabled,health=ext.health||{};
     const caps=(ext.capabilities||[]).map(c=>'<span class="extension-badge">'+esc(c)+'</span>').join('');
     const sourceBadge=ext.builtin?'<span class="extension-badge">Bundled</span>':'<span class="extension-badge warn">User</span>';
-    const statusBadge=installed?(enabled?'<span class="extension-badge on">On</span>':'<span class="extension-badge off">Off</span>'):'<span class="extension-badge off">Not installed</span>';
+    const safety=health.safety||{};
+    const safetyBadge='<span class="extension-badge '+(health.safe?'on':'warn')+'">'+esc(safety.label||'Safety check')+'</span>';
+    const version=ext.version?'<span class="extension-badge">v'+esc(ext.version)+'</span>':'';
+    const statusBadge=extensionStatusBadge(ext);
     const disabled=canManage?'':'disabled';
+    const fatalManifestError=health.status==='error'&&!installed;
     const settingsBtn=installed&&(ext.settings_schema||[]).length?'<button class="ext-btn" data-ext-action="configure" data-ext-id="'+escAttr(ext.id)+'" '+disabled+'>Configure</button>':'';
-    const controls=installed
-      ? '<button class="ext-btn" data-ext-action="toggle" data-ext-id="'+escAttr(ext.id)+'" '+disabled+'>'+(enabled?'Turn Off':'Turn On')+'</button>'+settingsBtn+'<button class="ext-btn danger" data-ext-action="uninstall" data-ext-id="'+escAttr(ext.id)+'" '+disabled+'>Uninstall</button>'
-      : '<button class="ext-btn primary" data-ext-action="install" data-ext-id="'+escAttr(ext.id)+'" '+disabled+'>Install</button>';
+    const controls=fatalManifestError
+      ? '<button class="ext-btn" disabled>Fix Manifest</button>'
+      : (installed
+        ? '<button class="ext-btn" data-ext-action="toggle" data-ext-id="'+escAttr(ext.id)+'" '+disabled+'>'+(enabled?'Turn Off':'Turn On')+'</button>'+settingsBtn+'<button class="ext-btn danger" data-ext-action="uninstall" data-ext-id="'+escAttr(ext.id)+'" '+disabled+'>Uninstall</button>'
+        : '<button class="ext-btn primary" data-ext-action="install" data-ext-id="'+escAttr(ext.id)+'" '+disabled+'>Install</button>');
+    const author=ext.author?('By '+ext.author):'Creator unknown';
+    const updated=shortDate(ext.updated_at||ext.created_at);
+    const created=shortDate(ext.created_at);
+    const details=[author,updated?('Updated '+updated):(created?('Created '+created):''),ext.license||'Creator retains rights'].filter(Boolean).map(esc).join(' &middot; ');
+    const path=canManage&&ext.path?'<div class="extension-submeta">'+esc(ext.path)+'</div>':'';
     return '<article class="extension-card">'+
       '<div class="extension-card-head"><div><h3>'+esc(ext.name)+'</h3><p>'+esc(ext.description||'No description provided.')+'</p></div>'+statusBadge+'</div>'+
-      '<div class="extension-meta">'+sourceBadge+'<span class="extension-badge">v'+esc(ext.version||'1.0.0')+'</span>'+caps+'</div>'+
+      '<div class="extension-submeta">'+details+'</div>'+path+
+      '<div class="extension-meta">'+sourceBadge+version+safetyBadge+caps+'</div>'+extensionDiagnostics(ext)+
       '<div class="extension-actions">'+controls+'</div>'+
       '</article>';
   }).join('');
@@ -2626,6 +3069,63 @@ $('#extensionConfigSave').addEventListener('click',async()=>{
   } catch(e){toast('Settings save failed','error');}
 });
 
+function suggestedExtensionId(name){
+  const slug=String(name||'addon').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')||'addon';
+  return ('community.'+slug).slice(0,64).replace(/[._-]+$/,'')||'community.addon';
+}
+
+function openExtensionCreate(){
+  extensionCreateIdTouched=false;
+  $('#extensionCreateName').value='My LiquidDrop Add-on';
+  $('#extensionCreateId').value='community.my-addon';
+  $('#extensionCreateAuthor').value='';
+  $('#extensionCreateDescription').value='A community add-on created with the LiquidDrop starter.';
+  $('#extensionCreateOverlay').classList.add('show');
+}
+
+function closeExtensionCreate(){
+  $('#extensionCreateOverlay').classList.remove('show');
+}
+
+$('#extensionCreateName').addEventListener('input',e=>{
+  if(!extensionCreateIdTouched) $('#extensionCreateId').value=suggestedExtensionId(e.target.value);
+});
+$('#extensionCreateId').addEventListener('input',()=>{extensionCreateIdTouched=true;});
+$('#extensionCreateCancel').addEventListener('click',closeExtensionCreate);
+$('#extensionCreateOverlay').addEventListener('click',e=>{if(e.target===$('#extensionCreateOverlay')) closeExtensionCreate();});
+$('#extensionCreateSave').addEventListener('click',async()=>{
+  const btn=$('#extensionCreateSave');
+  const form=$('#extensionCreateForm');
+  const payload={
+    name:form.elements.name.value,
+    id:form.elements.id.value,
+    author:form.elements.author.value,
+    description:form.elements.description.value
+  };
+  btn.disabled=true;
+  try{
+    const r=await fetch(API+'/extensions/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({extension:payload})});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const data=await r.json();
+    toast('Starter add-on created','success');
+    closeExtensionCreate();
+    await loadExtensions(false);
+    switchAppTab('extensions');
+  } catch(e){
+    toast('Create add-on failed','error');
+  }
+  btn.disabled=false;
+});
+
+$('#openExtensionsFolderBtn').addEventListener('click',async()=>{
+  try{
+    const r=await fetch(API+'/extensions/open-folder',{method:'POST'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    toast('Add-on folder opened','success');
+  } catch(e){toast('Open folder failed','error');}
+});
+
+$('#createExtensionBtn').addEventListener('click',openExtensionCreate);
 $('#refreshExtensionsBtn').addEventListener('click',()=>loadExtensions(false));
 $('#installExtensionBtn').addEventListener('click',()=>$('#extensionFileInput').click());
 $('#extensionFileInput').addEventListener('change',async()=>{
@@ -2930,6 +3430,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except ValueError as e:
                     self._send_json({"error": str(e)}, status=404)
                 return
+            if len(rest_parts) == 2 and rest_parts[1] == "state":
+                try:
+                    self._send_json(_extension_shared_state(ext_id))
+                except ValueError as e:
+                    self._send_json({"error": str(e)}, status=404)
+                return
             self.send_error(404)
 
         elif route == "extension-assets" and len(parts) > 2:
@@ -3119,6 +3625,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     manifest = _install_extension_manifest(manifest_data)
                     self._send_json({"status": "ok", "extension": manifest})
                     return
+                if len(parts) == 3 and parts[2] == "create":
+                    data = self._read_json()
+                    payload = data.get("extension", data) if isinstance(data, dict) else {}
+                    manifest, folder = _create_extension_scaffold(payload)
+                    self._send_json({"status": "ok", "extension": manifest, "path": folder})
+                    return
+                if len(parts) == 3 and parts[2] == "open-folder":
+                    folder = _open_extensions_folder()
+                    self._send_json({"status": "ok", "path": folder})
+                    return
                 if len(parts) < 4:
                     self.send_error(404)
                     return
@@ -3143,6 +3659,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     incoming = data.get("settings", data) if isinstance(data, dict) else {}
                     settings = _save_extension_settings(ext_id, incoming)
                     self._send_json({"status": "ok", "settings": settings})
+                    return
+                if action == "state":
+                    data = self._read_json()
+                    incoming = data.get("state", data) if isinstance(data, dict) else {}
+                    self._send_json({"status": "ok", **_save_extension_shared_state(ext_id, incoming)})
                     return
             except ValueError as e:
                 self._send_json({"error": str(e)}, status=400)

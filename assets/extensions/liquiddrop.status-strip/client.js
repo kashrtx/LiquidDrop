@@ -6,7 +6,9 @@
   let settings=null;
   let strip=null;
   let chips={};
-  let weatherCache={at:0,value:'Weather',code:null};
+  let weatherCache={at:0,value:'',code:null,unit:''};
+  const SHARED_WEATHER_TTL=30*60*1000;
+  const SHARED_ERROR_TTL=5*60*1000;
 
   function fmtSpeed(bps){
     if(!bps||bps<128) return 'Idle';
@@ -87,6 +89,9 @@
     el.querySelector('.ld-status-label').textContent=label;
     el.querySelector('.ld-status-value').textContent=value;
   }
+  function isHost(){
+    return !!(api.canManage&&api.canManage());
+  }
   async function getCoords(){
     if(settings.weatherMode==='off'||!settings.showWeather) return null;
     if(settings.weatherMode==='manual'){
@@ -94,7 +99,7 @@
       if(Math.abs(lat)>0.0001||Math.abs(lon)>0.0001) return {lat,lon};
       return null;
     }
-    if(!navigator.geolocation) return null;
+    if(!isHost()||!navigator.geolocation) return null;
     return await new Promise(resolve=>{
       navigator.geolocation.getCurrentPosition(
         p=>resolve({lat:p.coords.latitude,lon:p.coords.longitude}),
@@ -102,6 +107,54 @@
         {enableHighAccuracy:false,timeout:5000,maximumAge:30*60*1000}
       );
     });
+  }
+  async function fetchWeather(coords){
+    const unit=settings.temperatureUnit==='celsius'?'celsius':'fahrenheit';
+    const url='https://api.open-meteo.com/v1/forecast?latitude='+encodeURIComponent(coords.lat.toFixed(4))+'&longitude='+encodeURIComponent(coords.lon.toFixed(4))+'&current=temperature_2m,weather_code&temperature_unit='+unit+'&timezone=auto';
+    const r=await fetch(url,{cache:'no-store'});
+    if(!r.ok) throw new Error('weather');
+    const data=await r.json();
+    const current=data.current||{};
+    const code=Number(current.weather_code);
+    const temp=Math.round(Number(current.temperature_2m));
+    const unitLabel=unit==='celsius'?'C':'F';
+    const info=weatherInfo(code);
+    return {status:'ok',at:Date.now(),value:temp+'\u00b0'+unitLabel+' '+info.label,code,unit:settings.temperatureUnit,lat:coords.lat,lon:coords.lon};
+  }
+  async function publishSharedWeather(weather){
+    if(!isHost()||!api.setSharedState) return;
+    try{
+      const shared=api.getSharedState?await api.getSharedState(id).catch(()=>({})):{};
+      shared.weather=weather;
+      await api.setSharedState(id,shared);
+    } catch(e){}
+  }
+  function applyWeather(weather){
+    const info=weatherInfo(Number(weather.code));
+    weatherCache={at:Number(weather.at)||Date.now(),value:weather.value||'Weather',code:Number(weather.code),unit:weather.unit||settings.temperatureUnit};
+    setChip('weather',info.icon,'Weather',weatherCache.value,true,false);
+  }
+  async function applySharedWeather(){
+    if(!api.getSharedState) return false;
+    try{
+      const shared=await api.getSharedState(id);
+      const weather=shared&&shared.weather;
+      if(!weather||!weather.at) return false;
+      const age=Date.now()-Number(weather.at);
+      if(weather.status==='ok'&&weather.value&&age<SHARED_WEATHER_TTL){
+        applyWeather(weather);
+        return true;
+      }
+      if(weather.status==='needs-location'&&age<SHARED_ERROR_TTL){
+        setChip('weather','cloud','Weather','Set on host',true,false);
+        return true;
+      }
+      if(weather.status==='error'&&age<SHARED_ERROR_TTL){
+        setChip('weather','cloud','Weather','Unavailable',true,false);
+        return true;
+      }
+    } catch(e){}
+    return false;
   }
   async function updateWeather(force){
     if(!settings.showWeather||settings.weatherMode==='off'){
@@ -114,26 +167,20 @@
       setChip('weather',info.icon,'Weather',weatherCache.value,true,false);
       return;
     }
+    if(!isHost()&&await applySharedWeather()) return;
     const coords=await getCoords();
     if(!coords){
-      setChip('weather','cloud','Weather','Set location',true,false);
+      setChip('weather','cloud','Weather',isHost()?'Set location':'Set on host',true,false);
+      if(isHost()) publishSharedWeather({status:'needs-location',at:Date.now(),value:'Set location',unit:settings.temperatureUnit});
       return;
     }
     try{
-      const unit=settings.temperatureUnit==='celsius'?'celsius':'fahrenheit';
-      const url='https://api.open-meteo.com/v1/forecast?latitude='+encodeURIComponent(coords.lat.toFixed(4))+'&longitude='+encodeURIComponent(coords.lon.toFixed(4))+'&current=temperature_2m,weather_code&temperature_unit='+unit+'&timezone=auto';
-      const r=await fetch(url,{cache:'no-store'});
-      if(!r.ok) throw new Error('weather');
-      const data=await r.json();
-      const current=data.current||{};
-      const code=Number(current.weather_code);
-      const temp=Math.round(Number(current.temperature_2m));
-      const unitLabel=unit==='celsius'?'C':'F';
-      const info=weatherInfo(code);
-      weatherCache={at:now,value:temp+'\u00b0'+unitLabel+' '+info.label,code};
-      setChip('weather',info.icon,'Weather',weatherCache.value,true,false);
+      const weather=await fetchWeather(coords);
+      applyWeather(weather);
+      publishSharedWeather(weather);
     } catch(e){
       setChip('weather','cloud','Weather','Unavailable',true,false);
+      publishSharedWeather({status:'error',at:Date.now(),value:'Unavailable',unit:settings.temperatureUnit});
     }
   }
   async function updateStatus(){
@@ -146,7 +193,7 @@
       const devices=Math.max(1,s.active_devices||1);
       setChip('devices','devices','Devices',devices+' active',!!settings.showDevices,false);
       const up=s.upload_bps||0,down=s.download_bps||0,active=up>256||down>256;
-      setChip('speed','speed','Transfer','↑ '+fmtSpeed(up)+'  ↓ '+fmtSpeed(down),!!settings.showTransfer,active);
+      setChip('speed','speed','Transfer','\u2191 '+fmtSpeed(up)+'  \u2193 '+fmtSpeed(down),!!settings.showTransfer,active);
     } catch(e){
       setChip('devices','devices','Devices','Offline',!!settings.showDevices,false);
       setChip('speed','speed','Transfer','Idle',!!settings.showTransfer,false);
@@ -163,5 +210,5 @@
     window.addEventListener('focus',()=>{updateStatus();updateWeather(false);});
     document.addEventListener('visibilitychange',()=>{if(!document.hidden){updateStatus();updateWeather(false);}});
   }
-  start();
+  start().catch(e=>api.reportError&&api.reportError(id,e));
 })();

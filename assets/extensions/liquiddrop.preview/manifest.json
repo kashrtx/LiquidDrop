@@ -1,12 +1,15 @@
 {
   "id": "liquiddrop.preview",
   "name": "Media Preview Player",
-  "version": "1.2.0",
-  "description": "Open images, videos, audio, scrollable PDFs, DOCX, and text-like files in a polished in-page viewer without leaving LiquidDrop.",
+  "version": "1.3.0",
+  "description": "Open images, videos, audio, scrollable PDFs, DOCX, and text-like files in a polished in-page viewer with pointer-centered zoom and drag-to-pan media preview.",
   "author": "LiquidDrop",
+  "created_at": "2026-06-30T00:00:00Z",
+  "updated_at": "2026-07-03T00:00:00Z",
+  "license": "LiquidDrop project license",
   "category": "Media",
   "default_enabled": true,
-  "capabilities": ["Images", "Video", "Audio", "PDF", "DOCX", "Text"],
+  "capabilities": ["Images", "Video", "Pinch zoom", "Pointer zoom", "Audio", "PDF", "DOCX", "Text"],
   "client": {"script": "client.js"},
   "settings_schema": []
 }

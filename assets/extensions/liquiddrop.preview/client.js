@@ -31,9 +31,13 @@
   let zoomLabel = null;
   let activeMedia = null;
   let zoom = 1;
+  let mediaFrame = null;
   let visualizerStop = null;
   let requestSeq = 0;
   let pdfJsPromise = null;
+  const pointers = new Map();
+  let dragState = null;
+  let pinchState = null;
 
   function ext(name) { return String(name || '').includes('.') ? String(name).split('.').pop().toLowerCase() : ''; }
   function basename(name) { return String(name || '').split(/[\\/]/).pop().toLowerCase(); }
@@ -64,10 +68,16 @@
 .ld-preview-btn[disabled]{opacity:.35;pointer-events:none}
 .ld-preview-stage{position:relative;min-height:0;flex:1;max-width:1280px;width:100%;margin:0 auto;display:flex;align-items:center;justify-content:center;border-radius:18px;overflow:hidden;background:rgba(5,8,22,.72);border:1px solid rgba(255,255,255,.12);box-shadow:0 24px 80px rgba(0,0,0,.48);overscroll-behavior:contain}
 .ld-preview-stage.zoomed{overflow:auto}
+.ld-preview-stage.media{display:block;align-items:stretch;justify-content:flex-start;overflow:auto;touch-action:none;-webkit-overflow-scrolling:auto;scrollbar-gutter:stable;cursor:default}
+.ld-preview-stage.media.zoomed{cursor:grab}
+.ld-preview-stage.media.dragging{cursor:grabbing;user-select:none}
+.ld-media-canvas{position:relative;min-width:100%;min-height:100%;width:100%;height:100%;touch-action:none}
+.ld-media-canvas>img,.ld-media-canvas>video{position:absolute;display:block;max-width:none;max-height:none;width:auto;height:auto;object-fit:contain;transition:none;transform:none;transform-origin:center center;user-select:none;-webkit-user-drag:none}
+.ld-media-canvas>video{background:#000}
 .ld-preview-stage.document{align-items:flex-start;justify-content:flex-start;overflow:auto;padding:18px;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch}
 .ld-preview-stage.pdf{display:block;overflow-y:auto;overflow-x:auto;text-align:center;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
-.ld-preview-stage img,.ld-preview-stage video{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;transition:transform .16s ease;transform-origin:center center}
-.ld-preview-stage video{width:100%;height:100%;background:#000}
+.ld-preview-stage:not(.media) img,.ld-preview-stage:not(.media) video{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;transition:transform .16s ease;transform-origin:center center}
+.ld-preview-stage:not(.media)>video{width:100%;height:100%;background:#000}
 .ld-preview-doc{width:min(940px,100%);min-height:100%;background:#fbfbff;color:#111827;border-radius:12px;padding:22px;box-shadow:0 18px 54px rgba(0,0,0,.24);line-height:1.55;font-size:14px;transition:transform .16s ease;transform-origin:top left;flex:0 0 auto}
 .ld-preview-doc h3{margin:0 0 6px;font-size:18px;line-height:1.25;color:#0f172a;overflow-wrap:anywhere}
 .ld-preview-doc-meta{margin:0 0 18px;color:#64748b;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}
@@ -101,8 +111,16 @@
     overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
     content.addEventListener('wheel', e => {
       if (!activeMedia || activeMedia.tagName === 'AUDIO') return;
-      if (e.ctrlKey) { e.preventDefault(); setZoom(zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)); }
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const step = Math.exp(-e.deltaY * 0.0018);
+        setZoom(zoom * step, { clientX: e.clientX, clientY: e.clientY });
+      }
     }, { passive: false });
+    content.addEventListener('pointerdown', onMediaPointerDown);
+    content.addEventListener('pointermove', onMediaPointerMove);
+    content.addEventListener('pointerup', onMediaPointerEnd);
+    content.addEventListener('pointercancel', onMediaPointerEnd);
     document.addEventListener('keydown', e => {
       if (!overlay.classList.contains('show')) return;
       if (e.key === 'Escape') close();
@@ -110,22 +128,178 @@
       if ((e.ctrlKey || e.metaKey) && e.key === '-') { e.preventDefault(); setZoom(zoom / 1.25); }
       if ((e.ctrlKey || e.metaKey) && e.key === '0') { e.preventDefault(); setZoom(1); }
     });
+    window.addEventListener('resize', () => {
+      if (overlay.classList.contains('show') && isMediaZoomMode()) updateMediaLayout(anchorFromStageCenter());
+    });
     document.body.appendChild(overlay);
   }
 
-  function setZoom(next) {
-    zoom = Math.max(.25, Math.min(5, Number(next) || 1));
-    if (activeMedia) {
-      const mode = activeMedia.dataset.zoomMode || 'transform';
-      activeMedia.style.transform = 'scale(' + zoom + ')';
-      if (mode === 'document') {
-        activeMedia.style.transformOrigin = 'top left';
-      } else if (mode === 'pdf') {
-        activeMedia.style.transformOrigin = 'top center';
-      } else {
-        activeMedia.style.transformOrigin = 'center center';
+  function clamp(value, min, max) { return Math.max(min, Math.min(max, Number(value) || min)); }
+  function isMediaZoomMode() { return !!(mediaFrame && activeMedia && activeMedia.dataset.zoomMode === 'media'); }
+  function stageCenterPoint() {
+    const rect = content.getBoundingClientRect();
+    return { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+  }
+  function mediaPointFromClient(clientX, clientY) {
+    if (!mediaFrame || !mediaFrame.media) return { mx: .5, my: .5 };
+    const rect = mediaFrame.media.getBoundingClientRect();
+    return {
+      mx: clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+      my: clamp((clientY - rect.top) / Math.max(1, rect.height), 0, 1)
+    };
+  }
+  function normalizeMediaAnchor(anchor) {
+    const point = anchor || stageCenterPoint();
+    const clientX = Number.isFinite(point.clientX) ? point.clientX : stageCenterPoint().clientX;
+    const clientY = Number.isFinite(point.clientY) ? point.clientY : stageCenterPoint().clientY;
+    if (Number.isFinite(point.mx) && Number.isFinite(point.my)) {
+      return { clientX, clientY, mx: clamp(point.mx, 0, 1), my: clamp(point.my, 0, 1) };
+    }
+    return { clientX, clientY, ...mediaPointFromClient(clientX, clientY) };
+  }
+  function anchorFromStageCenter() { return normalizeMediaAnchor(stageCenterPoint()); }
+  function mediaSourceSize() {
+    if (!mediaFrame || !mediaFrame.media) return { width: 1, height: 1 };
+    const m = mediaFrame.media;
+    const width = m.naturalWidth || m.videoWidth || mediaFrame.sourceWidth || content.clientWidth || 1;
+    const height = m.naturalHeight || m.videoHeight || mediaFrame.sourceHeight || content.clientHeight || 1;
+    return { width: Math.max(1, width), height: Math.max(1, height) };
+  }
+  function updateMediaFit() {
+    if (!mediaFrame) return;
+    const source = mediaSourceSize();
+    mediaFrame.sourceWidth = source.width;
+    mediaFrame.sourceHeight = source.height;
+    const stageW = Math.max(1, content.clientWidth);
+    const stageH = Math.max(1, content.clientHeight);
+    let fit = Math.min(stageW / source.width, stageH / source.height);
+    if (!mediaFrame.allowUpscale) fit = Math.min(1, fit);
+    mediaFrame.baseWidth = Math.max(1, source.width * fit);
+    mediaFrame.baseHeight = Math.max(1, source.height * fit);
+  }
+  function updateMediaLayout(anchor) {
+    if (!mediaFrame) return;
+    updateMediaFit();
+    const normalized = anchor ? normalizeMediaAnchor(anchor) : null;
+    const scaledW = Math.max(1, mediaFrame.baseWidth * zoom);
+    const scaledH = Math.max(1, mediaFrame.baseHeight * zoom);
+    const canvasW = Math.max(content.clientWidth || 1, scaledW);
+    const canvasH = Math.max(content.clientHeight || 1, scaledH);
+    const left = Math.max(0, (canvasW - scaledW) / 2);
+    const top = Math.max(0, (canvasH - scaledH) / 2);
+    mediaFrame.canvas.style.width = canvasW + 'px';
+    mediaFrame.canvas.style.height = canvasH + 'px';
+    mediaFrame.media.style.width = scaledW + 'px';
+    mediaFrame.media.style.height = scaledH + 'px';
+    mediaFrame.media.style.left = left + 'px';
+    mediaFrame.media.style.top = top + 'px';
+    content.classList.toggle('zoomed', zoom > 1.01);
+    if (normalized) {
+      const rect = content.getBoundingClientRect();
+      content.scrollLeft = left + normalized.mx * scaledW - (normalized.clientX - rect.left);
+      content.scrollTop = top + normalized.my * scaledH - (normalized.clientY - rect.top);
+    } else if (zoom <= 1.01) {
+      content.scrollLeft = 0;
+      content.scrollTop = 0;
+    }
+  }
+  function setupMediaViewer(node, options) {
+    const canvas = document.createElement('div');
+    canvas.className = 'ld-media-canvas';
+    node.dataset.zoomMode = 'media';
+    canvas.appendChild(node);
+    content.classList.add('media');
+    content.appendChild(canvas);
+    mediaFrame = { canvas, media: node, allowUpscale: !!(options && options.allowUpscale), baseWidth: 1, baseHeight: 1, sourceWidth: 1, sourceHeight: 1 };
+    activeMedia = node;
+    updateMediaLayout();
+  }
+  function resetPointerState() {
+    pointers.clear();
+    dragState = null;
+    pinchState = null;
+    if (content) content.classList.remove('dragging');
+  }
+  function pointerPair() { return [...pointers.values()].slice(0, 2); }
+  function distance(a, b) { return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); }
+  function midpoint(a, b) { return { clientX: (a.clientX + b.clientX) / 2, clientY: (a.clientY + b.clientY) / 2 }; }
+  function onMediaPointerDown(e) {
+    if (!isMediaZoomMode() || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    pointers.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+    try { content.setPointerCapture(e.pointerId); } catch (_) { }
+    if (pointers.size === 1) {
+      dragState = { id: e.pointerId, x: e.clientX, y: e.clientY, scrollLeft: content.scrollLeft, scrollTop: content.scrollTop, moved: false };
+    } else if (pointers.size >= 2) {
+      const [a, b] = pointerPair();
+      const center = midpoint(a, b);
+      pinchState = { distance: Math.max(1, distance(a, b)), zoom, anchor: normalizeMediaAnchor(center) };
+      dragState = null;
+      e.preventDefault();
+    }
+  }
+  function onMediaPointerMove(e) {
+    if (!isMediaZoomMode() || !pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+    if (pinchState && pointers.size >= 2) {
+      const [a, b] = pointerPair();
+      const center = midpoint(a, b);
+      const next = pinchState.zoom * (distance(a, b) / pinchState.distance);
+      setZoom(next, { clientX: center.clientX, clientY: center.clientY, mx: pinchState.anchor.mx, my: pinchState.anchor.my });
+      e.preventDefault();
+      return;
+    }
+    if (!dragState || dragState.id !== e.pointerId || zoom <= 1.01) return;
+    const dx = e.clientX - dragState.x;
+    const dy = e.clientY - dragState.y;
+    if (!dragState.moved && Math.abs(dx) + Math.abs(dy) > 3) dragState.moved = true;
+    if (dragState.moved) {
+      content.scrollLeft = dragState.scrollLeft - dx;
+      content.scrollTop = dragState.scrollTop - dy;
+      content.classList.add('dragging');
+      e.preventDefault();
+    }
+  }
+  function onMediaPointerEnd(e) {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.delete(e.pointerId);
+    try { content.releasePointerCapture(e.pointerId); } catch (_) { }
+    if (pointers.size >= 2) {
+      const [a, b] = pointerPair();
+      const center = midpoint(a, b);
+      pinchState = { distance: Math.max(1, distance(a, b)), zoom, anchor: normalizeMediaAnchor(center) };
+      dragState = null;
+      return;
+    }
+    pinchState = null;
+    if (pointers.size === 1) {
+      const remaining = [...pointers.entries()][0];
+      dragState = { id: remaining[0], x: remaining[1].clientX, y: remaining[1].clientY, scrollLeft: content.scrollLeft, scrollTop: content.scrollTop, moved: false };
+    } else {
+      dragState = null;
+      content.classList.remove('dragging');
+    }
+  }
+
+  function setZoom(next, anchor) {
+    const target = Math.max(.25, Math.min(8, Number(next) || 1));
+    if (isMediaZoomMode()) {
+      const normalized = normalizeMediaAnchor(anchor || stageCenterPoint());
+      zoom = target;
+      updateMediaLayout(normalized);
+    } else {
+      zoom = target;
+      if (activeMedia) {
+        const mode = activeMedia.dataset.zoomMode || 'transform';
+        activeMedia.style.transform = 'scale(' + zoom + ')';
+        if (mode === 'document') {
+          activeMedia.style.transformOrigin = 'top left';
+        } else if (mode === 'pdf') {
+          activeMedia.style.transformOrigin = 'top center';
+        } else {
+          activeMedia.style.transformOrigin = 'center center';
+        }
+        content.classList.toggle('zoomed', zoom > 1.01 || zoom < 0.99);
       }
-      content.classList.toggle('zoomed', zoom > 1.01 || zoom < 0.99);
     }
     if (zoomLabel) zoomLabel.textContent = Math.round(zoom * 100) + '%';
   }
@@ -142,8 +316,11 @@
     if (!overlay) return;
     requestSeq++;
     stopMedia();
+    resetPointerState();
+    mediaFrame = null;
+    activeMedia = null;
     overlay.classList.remove('show');
-    if (content) content.classList.remove('zoomed', 'document', 'pdf');
+    if (content) content.classList.remove('zoomed', 'document', 'pdf', 'media', 'dragging');
     setTimeout(() => { if (content && !overlay.classList.contains('show')) content.innerHTML = ''; }, 180);
   }
 
@@ -637,8 +814,10 @@
     download.href = dl;
     download.setAttribute('download', name);
     content.innerHTML = '';
-    content.classList.remove('zoomed', 'document', 'pdf');
+    content.classList.remove('zoomed', 'document', 'pdf', 'media', 'dragging');
     activeMedia = null;
+    mediaFrame = null;
+    resetPointerState();
     setZoom(1);
     overlay.classList.add('show');
 
@@ -646,9 +825,10 @@
     if (type === 'image') {
       node = document.createElement('img');
       node.alt = name;
+      node.draggable = false;
+      node.onload = () => { if (seq === requestSeq) { updateMediaLayout(anchorFromStageCenter()); setZoom(1); } };
       node.src = url;
-      activeMedia = node;
-      content.appendChild(node);
+      setupMediaViewer(node, { allowUpscale: false });
       setZoomEnabled(true);
     } else if (type === 'video') {
       node = document.createElement('video');
@@ -656,8 +836,8 @@
       node.controls = true;
       node.playsInline = true;
       node.autoplay = true;
-      activeMedia = node;
-      content.appendChild(node);
+      node.addEventListener('loadedmetadata', () => { if (seq === requestSeq) { updateMediaLayout(anchorFromStageCenter()); setZoom(1); } }, { once: true });
+      setupMediaViewer(node, { allowUpscale: true });
       setZoomEnabled(true);
     } else if (type === 'audio') {
       const shell = document.createElement('div');
