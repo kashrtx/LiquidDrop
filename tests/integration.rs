@@ -28,27 +28,44 @@ fn free_port() -> u16 {
 }
 
 fn start(tag: &str) -> Server {
-    let dir = std::env::temp_dir().join(format!("liquiddrop-test-{}-{}-{}", tag, std::process::id(), free_port()));
+    // Tests run in parallel, so two servers can be handed the same "free"
+    // port. Verify we reached *our* server (via its own token) and retry
+    // with a new port if another test got there first.
+    let dir = std::env::temp_dir().join(format!("liquiddrop-test-{}-{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let port = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_liquiddrop"))
-        .args(["--no-browser", "--no-tray", "--bind", "127.0.0.1", "--port", &port.to_string(), "--dir"])
-        .arg(&dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn liquiddrop");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            break;
+    for _attempt in 0..8 {
+        let port = free_port();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_liquiddrop"))
+            .args(["--no-browser", "--no-tray", "--bind", "127.0.0.1", "--port", &port.to_string(), "--dir"])
+            .arg(&dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn liquiddrop");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Ok(Some(_)) = child.try_wait() {
+                break; // exited (port taken): try another port
+            }
+            if let Ok(raw) = std::fs::read_to_string(dir.join(".token")) {
+                let token = raw.trim().to_string();
+                if !token.is_empty() && TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    match try_request(port, "GET", &format!("/{}/status", token), &[], b"") {
+                        Some(r) if r.status == 200 => return Server { child, port, dir, token },
+                        Some(r) if r.status == 403 => break, // another test's server has this port
+                        _ => {}
+                    }
+                }
+            }
+            assert!(Instant::now() < deadline, "server did not start");
+            std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(Instant::now() < deadline, "server did not start");
-        std::thread::sleep(Duration::from_millis(50));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(dir.join(".instance.json"));
     }
-    let token = std::fs::read_to_string(dir.join(".token")).unwrap().trim().to_string();
-    Server { child, port, dir, token }
+    panic!("could not start a test server");
 }
 
 struct Resp {
@@ -90,22 +107,22 @@ fn dechunk(mut data: &[u8]) -> Vec<u8> {
     }
 }
 
-fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Resp {
-    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+fn try_request(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Option<Resp> {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(20))).ok()?;
     let mut req = format!("{} {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: {}\r\n", method, path, body.len());
     for (k, v) in headers {
         req.push_str(&format!("{}: {}\r\n", k, v));
     }
     req.push_str("\r\n");
-    s.write_all(req.as_bytes()).unwrap();
-    s.write_all(body).unwrap();
+    s.write_all(req.as_bytes()).ok()?;
+    s.write_all(body).ok()?;
     let mut raw = Vec::new();
     let _ = s.read_to_end(&mut raw);
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("response headers");
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
     let head = String::from_utf8_lossy(&raw[..split]).to_string();
     let mut lines = head.split("\r\n");
-    let status: u16 = lines.next().unwrap().split(' ').nth(1).unwrap().parse().unwrap();
+    let status: u16 = lines.next()?.split(' ').nth(1)?.parse().ok()?;
     let headers: Vec<(String, String)> = lines
         .filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
         .collect();
@@ -116,7 +133,11 @@ fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: 
     if chunked {
         body = dechunk(&body);
     }
-    Resp { status, headers, body }
+    Some(Resp { status, headers, body })
+}
+
+fn request(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Resp {
+    try_request(port, method, path, headers, body).expect("valid HTTP response")
 }
 
 fn get(srv: &Server, path: &str) -> Resp {

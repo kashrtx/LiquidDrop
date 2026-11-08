@@ -168,7 +168,7 @@ async fn get_route(
     host: bool,
     route_name: &str,
     rest: &str,
-    query: &str,
+    _query: &str,
 ) -> Resp {
     match route_name {
         "" | "index.html" => web::html(StatusCode::OK, pages::index(app, host)),

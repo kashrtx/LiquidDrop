@@ -408,6 +408,7 @@ pub fn fmt_size(n: u64) -> String {
     }
 }
 
+#[allow(dead_code)] // used by the tray (Windows/macOS)
 pub fn fmt_speed(bps: u64) -> String {
     let b = bps as f64;
     if b < 1024.0 {
@@ -497,6 +498,7 @@ pub fn mime_for(name: &str) -> &'static str {
 // ── OS integration ──────────────────────────────────────────────────────
 
 /// Put text on the system clipboard using the OS's built-in tool.
+#[allow(dead_code)] // used by the tray (Windows/macOS)
 pub fn copy_to_clipboard(text: &str) -> bool {
     use std::io::Write;
     #[cfg(target_os = "windows")]

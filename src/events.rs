@@ -116,6 +116,7 @@ impl Stats {
     }
 
     /// Addresses of devices seen recently or currently connected live.
+    #[allow(dead_code)] // used by the tray (Windows/macOS)
     pub fn device_ips(&self) -> Vec<IpAddr> {
         let g = self.lock();
         Stats::devices_locked(&g)
