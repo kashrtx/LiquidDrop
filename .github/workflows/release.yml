@@ -23,14 +23,14 @@ jobs:
             name: LiquidDrop-macos-universal
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target == 'universal' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Bundle pdf.js (offline PDF preview)
         shell: bash
-        run: ./scripts/fetch-vendor.sh
+        run: bash scripts/fetch-vendor.sh
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools

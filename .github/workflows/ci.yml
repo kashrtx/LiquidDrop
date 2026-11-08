@@ -13,12 +13,12 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Bundle pdf.js (offline PDF preview)
         shell: bash
-        run: ./scripts/fetch-vendor.sh
+        run: bash scripts/fetch-vendor.sh
       - name: Build
         run: cargo build --release
       - name: Upload test build
