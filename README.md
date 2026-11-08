@@ -37,13 +37,13 @@ Every other file transfer tool wants you to install an app on both devices. Liqu
 
 ## Download and run
 
-Grab the file for your computer from the **Releases** page and open it. That's it — no Python, no pip, no installer.
+Grab the file for your computer below (or from the [Releases](../../releases/latest) page) and open it. That's it — no Python, no pip, no installer.
 
 | OS | Download | First launch |
 |---|---|---|
-| Windows | `LiquidDrop-windows-x64.zip` → `LiquidDrop.exe` | SmartScreen may say "unrecognized app": **More info → Run anyway**. Allow it on **Private networks** when the firewall asks (phones can't connect otherwise). |
-| macOS | `LiquidDrop-macos-universal.zip` → `LiquidDrop.app` (Intel + Apple Silicon) | Right-click → **Open** the first time (the app isn't notarized). Allow "find devices on your local network". |
-| Linux | `LiquidDrop-linux-x64.tar.gz` → `liquiddrop` | `./liquiddrop` (static binary, any distro). |
+| Windows | [LiquidDrop-windows-x64.zip](../../releases/latest/download/LiquidDrop-windows-x64.zip) → `LiquidDrop.exe` | SmartScreen may say "unrecognized app": **More info → Run anyway**. Allow it on **Private networks** when the firewall asks (phones can't connect otherwise). |
+| macOS | [LiquidDrop-macos-universal.zip](../../releases/latest/download/LiquidDrop-macos-universal.zip) → `LiquidDrop.app` (Intel + Apple Silicon) | Right-click → **Open** the first time (the app isn't notarized). Allow "find devices on your local network". |
+| Linux | [LiquidDrop-linux-x64.tar.gz](../../releases/latest/download/LiquidDrop-linux-x64.tar.gz) → `liquiddrop` | `./liquiddrop` (static binary, any distro). |
 
 Your browser opens to the host view and LiquidDrop moves into the **system tray** (Windows) or **menu bar** (macOS). The tray menu shows the phone link, PIN and connected devices, and has **Open LiquidDrop**, **Copy phone link**, **Open shared folder** and **Quit**. Hover the icon to see live transfer speed. On Linux it runs in the terminal (the Linux build stays a single static file with no GUI libraries).
 
@@ -89,7 +89,7 @@ v5 is a rewrite in Rust. The speed you'll actually feel comes from a new transfe
 
 ### Upgrading from v4
 
-Nothing to migrate. v5 uses the same `~/LiquidDrop` folder, `.token`, port, URL layout, extension folders, settings and certificates, so bookmarks, home-screen shortcuts and add-ons keep working. `liquiddrop.py` stays in the repo as a fallback.
+Nothing to migrate. v5 uses the same `~/LiquidDrop` folder, `.token`, port, URL layout, extension folders, settings and certificates, so bookmarks, home-screen shortcuts and add-ons keep working. The Python version is kept in [`legacy/`](legacy/) as a fallback.
 
 ## Security
 
@@ -142,7 +142,7 @@ ui/             web UI (embedded into the binary at build time)
 assets/extensions/  bundled add-ons (also embedded)
 packaging/      app icons, macOS Info.plist
 tests/          end-to-end tests
-liquiddrop.py   legacy v4 (Python), kept as a fallback
+legacy/         v4.1 (Python), kept as a fallback
 ```
 
 ## License

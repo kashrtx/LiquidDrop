@@ -4,7 +4,8 @@
 use std::io;
 use std::path::PathBuf;
 
-pub const APP_VERSION: &str = "5.0";
+/// Comes from `version` in Cargo.toml, so there is only one place to change it.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_PORT: u16 = 7777;
 
 pub const CHUNK: usize = 256 * 1024;
