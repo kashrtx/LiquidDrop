@@ -298,7 +298,7 @@ pub fn read_json_file(path: &Path) -> Option<Value> {
 
 fn tmp_sibling(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
-    s.push(".tmp");
+    s.push(format!(".{}.tmp", random_hex(4)));
     PathBuf::from(s)
 }
 
@@ -313,13 +313,29 @@ pub fn write_json_file(path: &Path, value: &Value) -> io::Result<()> {
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let tmp = tmp_sibling(path);
     fs::write(&tmp, body)?;
-    fs::rename(&tmp, path)
+    rename_replace(&tmp, path)
+}
+
+/// Rename over an existing file, retrying briefly if Windows has it locked.
+fn rename_replace(tmp: &Path, path: &Path) -> io::Result<()> {
+    let mut result = fs::rename(tmp, path);
+    for attempt in 1..5u64 {
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40 * attempt));
+        result = fs::rename(tmp, path);
+    }
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
 }
 
 pub fn write_bytes_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     let tmp = tmp_sibling(path);
     fs::write(&tmp, data)?;
-    fs::rename(&tmp, path)
+    rename_replace(&tmp, path)
 }
 
 // ── Python-compatible coercions (keeps extension behaviour identical) ──
@@ -427,6 +443,14 @@ pub fn extension_of(name: &str) -> String {
         Some(i) if i > 0 && i + 1 < name.len() => name[i + 1..].to_ascii_lowercase(),
         _ => String::new(),
     }
+}
+
+/// File types a browser could execute as a page (HTML, SVG, XML...).
+pub fn is_active_content(name: &str) -> bool {
+    matches!(
+        extension_of(name).as_str(),
+        "html" | "htm" | "xhtml" | "xht" | "shtml" | "svg" | "svgz" | "xml" | "xsl" | "xslt" | "mht" | "mhtml"
+    )
 }
 
 pub fn mime_for(name: &str) -> &'static str {

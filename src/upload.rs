@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 
-const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn valid_upload_id(id: &str) -> bool {
     (8..=80).contains(&id.len())
@@ -72,6 +72,9 @@ pub async fn start(app: &Arc<App>, body: Value) -> Resp {
         Err(_) => return json_error(StatusCode::CONFLICT, "Upload is busy."),
     };
 
+    if let Ok(mut m) = app.completed.lock() {
+        m.remove(&id); // a new upload with this id starts fresh
+    }
     let existing = util::read_json_file(&meta);
     let same = existing
         .as_ref()
@@ -212,7 +215,14 @@ pub async fn complete(app: &Arc<App>, id: &str) -> Resp {
     let meta_file = meta_path(app, id);
     let meta = match util::read_json_file(&meta_file) {
         Some(m) => m,
-        None => return json_error(StatusCode::NOT_FOUND, "Unknown upload."),
+        None => {
+            // Already completed (the phone retried because the reply got lost)?
+            let done = app.completed.lock().ok().and_then(|m| m.get(id).cloned());
+            return match done {
+                Some((name, size, _)) => ok_json(&json!({"status": "ok", "name": name, "size": size})),
+                None => json_error(StatusCode::NOT_FOUND, "Unknown upload."),
+            };
+        }
     };
     let size = value_u64(meta.get("size")).unwrap_or(0);
     let name = files::sanitize_filename(meta.get("name").and_then(|v| v.as_str()).unwrap_or(""));
@@ -238,6 +248,9 @@ pub async fn complete(app: &Arc<App>, id: &str) -> Resp {
     let _ = tokio::fs::remove_file(&meta_file).await;
     app.forget_upload_lock(id);
     let final_name = files::file_name_of(&dest);
+    if let Ok(mut m) = app.completed.lock() {
+        m.insert(id.to_string(), (final_name.clone(), size, std::time::Instant::now()));
+    }
     say!("  {}⬆  Received:{} {} ({})", CYAN, RESET, final_name, util::fmt_size(size));
     app.hub.send(LiveEvent::Files);
     ok_json(&json!({"status": "ok", "name": final_name, "size": size}))

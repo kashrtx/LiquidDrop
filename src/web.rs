@@ -135,6 +135,12 @@ pub struct ServeOpts<'a> {
     pub count_download: bool,
     /// Render any HTML/SVG in an isolated origin if opened directly.
     pub sandbox: bool,
+    /// Cap open-ended Range responses (e.g. `bytes=0-`) at this many bytes.
+    /// Media players then fetch the next piece when they need it instead of
+    /// holding a connection open for the whole file. Browsers only allow ~6
+    /// connections per host on HTTP/1.1, so idle video previews used to block
+    /// uploads.
+    pub max_range_len: Option<u64>,
 }
 
 enum RangeReq {
@@ -230,7 +236,13 @@ pub async fn serve_path(
 
     let (status, start, count) = match range {
         RangeReq::Full => (StatusCode::OK, 0u64, len),
-        RangeReq::Partial(s, e) => (StatusCode::PARTIAL_CONTENT, s, e - s + 1),
+        RangeReq::Partial(s, e) => {
+            let mut count = e - s + 1;
+            if let Some(cap) = opts.max_range_len {
+                count = count.min(cap.max(1));
+            }
+            (StatusCode::PARTIAL_CONTENT, s, count)
+        }
         RangeReq::Unsatisfiable => {
             let mut r = response(StatusCode::RANGE_NOT_SATISFIABLE, empty());
             set_header(&mut r, "content-range", &format!("bytes */{}", len));

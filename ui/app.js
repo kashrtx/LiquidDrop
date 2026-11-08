@@ -76,7 +76,23 @@ fi.addEventListener('change',()=>{
   ev.preventDefault();dz.classList.remove('drag-over');
 }));
 dz.addEventListener('drop',ev=>{
-  if(ev.dataTransfer.files.length) handleFiles(Array.from(ev.dataTransfer.files));
+  const dt=ev.dataTransfer;
+  if(!dt||!dt.files.length) return;
+  const files=Array.from(dt.files);
+  let folders=0;
+  if(dt.items&&dt.items.length===files.length){
+    const keep=[];
+    for(let i=0;i<files.length;i++){
+      const it=dt.items[i];
+      const entry=it&&it.webkitGetAsEntry?it.webkitGetAsEntry():null;
+      if(entry&&entry.isDirectory) folders++;
+      else keep.push(files[i]);
+    }
+    if(folders) toast(folders===1?'Folders can\'t be sent — zip it first':folders+' folders skipped — zip them first','error');
+    if(keep.length) handleFiles(keep);
+    return;
+  }
+  handleFiles(files);
 });
 
 const ZIP_THRESHOLD=3;
@@ -137,7 +153,8 @@ function filePreviewMarkup(file){
     return '<div class="file-preview img-type"><img src="'+thumb+'" data-full="'+src+'" loading="lazy" decoding="async" alt=""></div>';
   }
   if(kind==='video'){
-    return '<div class="file-preview vid-type"><video muted playsinline preload="metadata" data-preview-video src="'+src+'"></video></div>';
+    const pkey=escAttr(file.name+'|'+file.size+'|'+file.modified);
+    return '<div class="file-preview vid-type" data-poster-src="'+src+'" data-poster-key="'+pkey+'"><span class="vid-icon">🎬</span></div>';
   }
   if(kind==='audio'){
     return '<div class="file-preview placeholder audio-type"><span>🎵</span></div>';
@@ -151,16 +168,76 @@ function filePreviewMarkup(file){
   return '<div class="file-preview placeholder">📦</div>';
 }
 
+/* Video posters: load one video at a time, grab a frame, then release the
+   connection. Paused while uploads run so they always have bandwidth. */
+const videoPosterCache=new Map();
+const posterQueue=[];
+let posterBusy=false;
 function hydratePreviewMedia(){
-  document.querySelectorAll('video[data-preview-video]:not([data-hydrated])').forEach(v=>{
-    v.dataset.hydrated='1';
+  document.querySelectorAll('.file-preview.vid-type[data-poster-src]:not([data-poster-state])').forEach(el=>{
+    const cached=videoPosterCache.get(el.dataset.posterKey);
+    if(cached){applyPoster(el,cached);return;}
+    el.dataset.posterState='queued';
+    posterQueue.push(el);
+  });
+  pumpPosters();
+}
+function applyPoster(el,url){
+  el.dataset.posterState='done';
+  if(!url) return;
+  el.style.backgroundImage='url("'+url+'")';
+  el.classList.add('has-poster');
+}
+async function pumpPosters(){
+  if(posterBusy) return;
+  posterBusy=true;
+  try{
+    while(posterQueue.length){
+      if(uploadState.batches>0||document.hidden){await sleep(1500);continue;}
+      const el=posterQueue.shift();
+      if(!el.isConnected) continue;
+      const key=el.dataset.posterKey;
+      let url=videoPosterCache.get(key);
+      if(url===undefined){
+        url=await grabPoster(el.dataset.posterSrc);
+        videoPosterCache.set(key,url);
+      }
+      applyPoster(el,url);
+    }
+  } finally {posterBusy=false;}
+}
+function grabPoster(src){
+  return new Promise(resolve=>{
+    const v=document.createElement('video');
+    let finished=false;
+    const finish=url=>{
+      if(finished) return;
+      finished=true;
+      clearTimeout(timer);
+      try{v.pause();v.removeAttribute('src');v.load();}catch(_){}
+      resolve(url||null);
+    };
+    const timer=setTimeout(()=>finish(null),8000);
+    v.muted=true;v.playsInline=true;v.preload='auto';
+    v.setAttribute('muted','');v.setAttribute('playsinline','');
     v.addEventListener('loadedmetadata',()=>{
       try{
-        const target=v.duration && Number.isFinite(v.duration) ? Math.min(0.15,v.duration/2) : 0;
-        if(target>0) v.currentTime=target;
-      } catch(_){}
+        const t=v.duration&&Number.isFinite(v.duration)?Math.min(0.15,v.duration/2):0.1;
+        v.currentTime=t;
+      }catch(_){finish(null);}
     },{once:true});
-    v.addEventListener('seeked',()=>v.pause(),{once:true});
+    v.addEventListener('seeked',()=>{
+      try{
+        const w=160,h=Math.max(1,Math.round(w*(v.videoHeight||9)/(v.videoWidth||16)));
+        const c=document.createElement('canvas');
+        c.width=w;c.height=h;
+        c.getContext('2d').drawImage(v,0,0,w,h);
+        finish(c.toDataURL('image/jpeg',0.72));
+      }catch(_){finish(null);}
+    },{once:true});
+    v.addEventListener('error',()=>finish(null),{once:true});
+    v.src=src;
+    try{v.load();}catch(_){}
   });
 }
 
@@ -199,22 +276,39 @@ async function apiJSON(method,url,body){
   if(!r.ok){const err=new Error(data.error||('HTTP '+r.status));err.status=r.status;err.data=data;throw err;}
   return data;
 }
+async function sliceReadable(file,offset){
+  try{
+    const end=Math.min(file.size,offset+1);
+    if(end<=offset) return true;
+    await file.slice(offset,end).arrayBuffer();
+    return true;
+  }catch(e){return false;}
+}
 function retryable(e){
   return !e.status||e.status===408||e.status===409||(e.status>=500&&e.status!==507);
 }
+const UPLOAD_STALL_MS=30000;
 function putChunk(id,offset,blob,onProgress){
   return new Promise((res,rej)=>{
     const xhr=new XMLHttpRequest();
+    let lastActivity=Date.now(),stalled=false;
+    const watchdog=setInterval(()=>{
+      if(document.hidden){lastActivity=Date.now();return;}
+      if(Date.now()-lastActivity>UPLOAD_STALL_MS){stalled=true;xhr.abort();}
+    },3000);
+    const done=()=>clearInterval(watchdog);
     xhr.open('PUT',API+'/uploads/'+encodeURIComponent(id)+'?offset='+offset);
-    xhr.upload.onprogress=e=>onProgress(e.loaded);
+    xhr.upload.onprogress=e=>{lastActivity=Date.now();onProgress(e.loaded);};
+    xhr.upload.onload=()=>{lastActivity=Date.now();};
     xhr.onload=()=>{
+      done();
       let d={};
       try{d=JSON.parse(xhr.responseText||'{}');}catch(e){}
       if(xhr.status===200) res(d);
       else{const err=new Error(d.error||('HTTP '+xhr.status));err.status=xhr.status;err.data=d;rej(err);}
     };
-    xhr.onerror=()=>rej(new Error('Network error'));
-    xhr.onabort=()=>rej(new Error('Aborted'));
+    xhr.onerror=()=>{done();rej(new Error('Network error'));};
+    xhr.onabort=()=>{done();rej(new Error(stalled?'Stalled':'Aborted'));};
     xhr.send(blob);
   });
 }
@@ -239,6 +333,9 @@ async function uploadOne(file,task){
     }catch(e){
       task.inflight=0;
       if(!retryable(e)||++attempt>10) throw e;
+      if(!e.status&&!(await sliceReadable(file,offset))){
+        const err=new Error('unreadable');err.unreadable=true;throw err;
+      }
       if(attempt===2) toast('↻ Connection hiccup — resuming '+file.name,'success');
       await sleep(Math.min(15000,500*2**attempt));
       try{const st=await apiJSON('GET',API+'/uploads/'+encodeURIComponent(id));offset=Number(st.offset)||0;task.confirmed=offset;}catch(_){}
@@ -315,7 +412,9 @@ async function uploadFiles(files,opts){
         uploadState.done++;
       }catch(e){
         failed++;uploadState.failed++;
-        toast('✗ '+file.name+' failed','error');
+        toast(e&&e.unreadable
+          ? '✗ '+file.name+' can\'t be read anymore — pick it again'
+          : '✗ '+file.name+' failed','error');
       }
       uploadState.tasks.delete(task);
       uploadState.doneBytes+=file.size;
@@ -442,9 +541,9 @@ $('#fileList').addEventListener('click',e=>{
     e.preventDefault();e.stopPropagation();
     const n=del.dataset.name;
     showConfirm('🗑️','Delete File','Delete <strong>'+esc(n)+'</strong>?<br>This cannot be undone.','Delete','danger',()=>{
-      fetch(API+'/delete/'+encodeURIComponent(n),{method:'DELETE'})
+      apiJSON('DELETE',API+'/delete/'+encodeURIComponent(n))
         .then(()=>{toast('🗑️ Deleted','success');selectedFiles.delete(n);lastHash='';loadFiles();})
-        .catch(()=>toast('✗ Delete failed','error'));
+        .catch(e=>toast('✗ '+(e.status===409?'File is in use on the computer':'Delete failed'),'error'));
     });
     return;
   }
@@ -503,17 +602,19 @@ $('#batchDeleteBtn').addEventListener('click',()=>{
       isBusy=true;
       const names=[...selectedFiles];
       let ok=0;
+      const failed=new Set();
       for(const n of names){
         try{
-          await fetch(API+'/delete/'+encodeURIComponent(n),{method:'DELETE'});
+          await apiJSON('DELETE',API+'/delete/'+encodeURIComponent(n));
           ok++;
-        } catch(e){}
+        } catch(e){failed.add(n);}
       }
-      selectedFiles.clear();
+      selectedFiles=failed;
       isBusy=false;
       lastHash='';
       loadFiles();
-      toast('🗑️ Deleted '+ok+' file'+(ok!==1?'s':''),'success');
+      if(failed.size) toast('Deleted '+ok+' · '+failed.size+' still in use on the computer','error');
+      else toast('🗑️ Deleted '+ok+' file'+(ok!==1?'s':''),'success');
     }
   );
 });
@@ -1178,4 +1279,4 @@ refreshNetwork();
    relative times ("2m ago") periodically. */
 setInterval(()=>{if(!liveConnected) loadFiles();},4000);
 setInterval(refreshFileTimes,30000);
-document.addEventListener('visibilitychange',()=>{if(!document.hidden) loadFiles();});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadFiles();pumpPosters();}});

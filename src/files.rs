@@ -160,12 +160,25 @@ pub async fn finalize(app: &App, src: &Path, dir: &Path, name: &str) -> io::Resu
     let _guard = app.finalize_lock.lock().await;
     tokio::fs::create_dir_all(dir).await?;
     let dest = unique_destination(dir, name);
-    match tokio::fs::rename(src, &dest).await {
-        Ok(()) => Ok(dest),
-        Err(_) => {
-            tokio::fs::copy(src, &dest).await?;
+    let mut last_err = None;
+    for attempt in 0..6u64 {
+        match tokio::fs::rename(src, &dest).await {
+            Ok(()) => return Ok(dest),
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(150 * (attempt + 1))).await;
+            }
+        }
+    }
+    // Different volume or still locked: fall back to copy + delete.
+    match tokio::fs::copy(src, &dest).await {
+        Ok(_) => {
             let _ = tokio::fs::remove_file(src).await;
             Ok(dest)
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&dest).await;
+            Err(last_err.unwrap_or(e))
         }
     }
 }

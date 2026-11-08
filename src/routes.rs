@@ -224,6 +224,7 @@ async fn get_route(
                             disposition: Disposition::None,
                             count_download: false,
                             sandbox: false,
+                            max_range_len: None,
                         },
                         None,
                     )
@@ -253,6 +254,7 @@ async fn get_route(
                     disposition: Disposition::None,
                     count_download: false,
                     sandbox: true,
+                    max_range_len: None,
                 },
                 None,
             )
@@ -302,7 +304,9 @@ async fn get_route(
                         Disposition::Inline(&name)
                     },
                     count_download: true,
-                    sandbox: true,
+                    // Only page-like files need isolating; PDFs etc. must still open in a tab.
+                    sandbox: util::is_active_content(&name),
+                    max_range_len: if download { None } else { Some(8 * 1024 * 1024) },
                 },
                 Some(app.stats.clone()),
             )
@@ -694,13 +698,15 @@ async fn delete_route(app: &Arc<App>, route_name: &str, rest: &str) -> Resp {
         "delete" => {
             let name = util::url_unquote(rest);
             if let Some(path) = files::safe_path(&app.paths.root, &name) {
-                match tokio::fs::remove_file(&path).await {
-                    Ok(()) => {
-                        say!("  {}🗑  Deleted:{} {}", RED, RESET, name);
-                        app.hub.send(LiveEvent::Files);
-                    }
-                    Err(e) => say!("  {}🗑  Delete failed:{} {} ({})", RED, RESET, name, e),
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    say!("  {}🗑  Delete failed:{} {} ({})", RED, RESET, name, e);
+                    return json_error(
+                        StatusCode::CONFLICT,
+                        "This file is in use (open in another program?). Close it and try again.",
+                    );
                 }
+                say!("  {}🗑  Deleted:{} {}", RED, RESET, name);
+                app.hub.send(LiveEvent::Files);
             }
             ok_json(&json!({"status": "ok"}))
         }

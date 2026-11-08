@@ -217,6 +217,10 @@ fn resumable_upload_range_download_and_delete() {
     let r = request(srv.port, "POST", &format!("/{}/uploads/{}/complete", t, id), &[], b"");
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.json()["name"], name);
+    // The reply can get lost on flaky Wi-Fi; a retried "complete" must give the same answer.
+    let again = request(srv.port, "POST", &format!("/{}/uploads/{}/complete", t, id), &[], b"");
+    assert_eq!(again.status, 200, "{}", again.text());
+    assert_eq!(again.json()["name"], name);
 
     let files = get(&srv, &format!("/{}/files", t)).json();
     assert_eq!(files[0]["name"], name);

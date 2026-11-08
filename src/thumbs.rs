@@ -99,7 +99,20 @@ fn make_thumb(src: &Path, dst: &Path) -> Result<(), String> {
         _ => img,
     };
     let thumb = img.resize_to_fill(THUMB_PX, THUMB_PX, image::imageops::FilterType::Triangle);
-    let rgb = image::DynamicImage::ImageRgb8(thumb.to_rgb8());
+    let rgb = if thumb.color().has_alpha() {
+        let rgba = thumb.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let mut flat = image::RgbImage::new(w, h);
+        const BG: [f32; 3] = [30.0, 34.0, 62.0];
+        for (x, y, p) in rgba.enumerate_pixels() {
+            let a = p[3] as f32 / 255.0;
+            let mix = |c: u8, bg: f32| (c as f32 * a + bg * (1.0 - a)).round() as u8;
+            flat.put_pixel(x, y, image::Rgb([mix(p[0], BG[0]), mix(p[1], BG[1]), mix(p[2], BG[2])]));
+        }
+        image::DynamicImage::ImageRgb8(flat)
+    } else {
+        image::DynamicImage::ImageRgb8(thumb.to_rgb8())
+    };
     let mut out = std::io::Cursor::new(Vec::new());
     rgb.write_to(&mut out, image::ImageFormat::Jpeg)
         .map_err(|e| e.to_string())?;
@@ -156,6 +169,7 @@ pub async fn serve(app: &Arc<App>, headers: &http::HeaderMap, name: &str) -> Res
             disposition: Disposition::None,
             count_download: false,
             sandbox: false,
+            max_range_len: None,
         },
         None,
     )

@@ -35,6 +35,8 @@ pub struct App {
     pub hub: Hub,
     pub ext_lock: Mutex<()>,
     pub upload_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Recently finished uploads (id -> final name, size), for retried "complete" calls.
+    pub completed: Mutex<HashMap<String, (String, u64, std::time::Instant)>>,
     pub finalize_lock: tokio::sync::Mutex<()>,
     pub zip_tickets: Mutex<HashMap<String, ZipTicket>>,
     pub shutdown_tx: watch::Sender<bool>,
@@ -70,12 +72,18 @@ impl App {
             hub: Hub::new(),
             ext_lock: Mutex::new(()),
             upload_locks: Mutex::new(HashMap::new()),
+            completed: Mutex::new(HashMap::new()),
             finalize_lock: tokio::sync::Mutex::new(()),
             zip_tickets: Mutex::new(HashMap::new()),
             shutdown_tx,
             mdns_host: Mutex::new(None),
             #[cfg(feature = "thumbnails")]
-            thumb_sem: tokio::sync::Semaphore::new(2),
+            thumb_sem: tokio::sync::Semaphore::new(
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(2)
+                    .clamp(2, 6),
+            ),
         };
         app.regenerate_qr();
         app
@@ -198,6 +206,7 @@ impl App {
         let interfaces = net::scan();
         let host_ips = net::host_ips();
         let mut changed = false;
+        let mut address_changed = false;
         {
             let mut n = match self.net.write() {
                 Ok(n) => n,
@@ -212,6 +221,7 @@ impl App {
                     n.selected = best;
                     n.pinned = false;
                     changed = true;
+                    address_changed = true;
                 }
             }
             if list_changed {
@@ -221,13 +231,15 @@ impl App {
             n.host_ips = host_ips;
         }
         if changed {
-            self.regenerate_qr();
-            say!(
-                "  {}📶 Network changed — phones can now use {}{}",
-                YELLOW,
-                self.base_url(),
-                RESET
-            );
+            if address_changed {
+                self.regenerate_qr();
+                say!(
+                    "  {}📶 Network changed — phones can now use {}{}",
+                    YELLOW,
+                    self.base_url(),
+                    RESET
+                );
+            }
             self.hub.send(LiveEvent::Network);
         }
     }
@@ -235,6 +247,9 @@ impl App {
     pub fn expire_zip_tickets(&self) {
         if let Ok(mut m) = self.zip_tickets.lock() {
             m.retain(|_, t| t.created.elapsed() < Duration::from_secs(30 * 60));
+        }
+        if let Ok(mut m) = self.completed.lock() {
+            m.retain(|_, (_, _, t)| t.elapsed() < Duration::from_secs(30 * 60));
         }
     }
 
