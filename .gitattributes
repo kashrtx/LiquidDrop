@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Shell scripts must keep LF endings (they run on the GitHub Linux/macOS/Windows-bash builders)
+*.sh text eol=lf
+*.command text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+# Binary assets
+*.png binary
+*.ico binary
+*.rgba binary

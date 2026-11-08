@@ -69,7 +69,14 @@
     inFlight=false;
   }
   refresh();
-  setInterval(refresh,3000);
+  if(api.on){
+    // LiquidDrop 5: settings changes arrive instantly over the live connection.
+    api.on('settings',e=>{if(!e||e.id===id) refresh();});
+    api.on('live',e=>{if(e&&e.connected) refresh();});
+    setInterval(refresh,60000);
+  } else {
+    setInterval(refresh,3000);
+  }
   window.addEventListener('focus',refresh);
   window.addEventListener('pageshow',refresh);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden) refresh();});

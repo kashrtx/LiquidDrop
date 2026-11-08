@@ -1,0 +1,66 @@
+[package]
+name = "liquiddrop"
+version = "5.0.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Move files between your phone and computer. Nothing else."
+license = "Apache-2.0"
+build = "build.rs"
+publish = false
+
+[[bin]]
+name = "liquiddrop"
+path = "src/main.rs"
+
+[features]
+default = ["mdns", "thumbnails", "tray"]
+# Advertise http://liquiddrop.local on the network (Bonjour / mDNS).
+mdns = ["dep:mdns-sd"]
+# Small server-side JPEG thumbnails for the file list (much faster on phones).
+thumbnails = ["dep:image"]
+# System tray (Windows) / menu bar (macOS) icon. Linux builds stay a single
+# static binary without GUI libraries, so the tray is not built there.
+tray = ["dep:tray-icon", "dep:tao"]
+
+[dependencies]
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync", "time", "signal"] }
+tokio-util = { version = "0.7", features = ["io"] }
+hyper = { version = "1.4", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1.7", features = ["server", "server-auto", "tokio", "http1", "http2"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# TLS for --secure (pure Rust, no OpenSSL; uses the `ring` provider so it builds everywhere)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+time = "0.3"
+
+serde_json = "1"
+sha2 = "0.10"
+crc32fast = "1"
+flate2 = "1"
+memchr = "2"
+getrandom = "0.2"
+qrcode = { version = "0.14", default-features = false }
+if-addrs = "0.13"
+
+mdns-sd = { version = "0.11", optional = true }
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tray-icon = { version = "0.19", optional = true }
+tao = { version = "0.30", optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "unwind"

@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="LiquidDrop">
+<meta name="application-name" content="LiquidDrop">
+<meta name="theme-color" content="#141935">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
+<link rel="shortcut icon" href="/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<title>LiquidDrop — Enter PIN</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0a0a1a;--glass:rgba(255,255,255,0.06);--glass-border:rgba(255,255,255,0.12);--accent:#6ee7b7;--accent2:#818cf8;--accent3:#f472b6;--text:#f0f0f5;--text2:rgba(255,255,255,0.55);--radius:24px;--safe-top:env(safe-area-inset-top,20px);--safe-bottom:env(safe-area-inset-bottom,20px)}
+html{height:100%;-webkit-text-size-adjust:100%}
+body{min-height:100%;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',sans-serif;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;padding:20px;-webkit-font-smoothing:antialiased}
+.orb{position:fixed;border-radius:50%;filter:blur(80px);opacity:.35;pointer-events:none;z-index:0}
+.orb-1{width:340px;height:340px;background:radial-gradient(circle,#6ee7b7,transparent 70%);top:-80px;right:-60px;animation:f1 12s ease-in-out infinite}
+.orb-2{width:400px;height:400px;background:radial-gradient(circle,#818cf8,transparent 70%);bottom:-100px;left:-80px;animation:f2 15s ease-in-out infinite}
+@keyframes f1{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-40px,30px) scale(1.1)}}
+@keyframes f2{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(30px,-40px) scale(1.15)}}
+.card{background:var(--glass);backdrop-filter:blur(40px) saturate(1.6);-webkit-backdrop-filter:blur(40px) saturate(1.6);border:1px solid var(--glass-border);border-radius:var(--radius);padding:40px 32px;max-width:380px;width:100%;text-align:center;position:relative;z-index:1;box-shadow:0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.08);animation:fadeIn .5s ease both}
+.card::before{content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,transparent 50%);pointer-events:none}
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+.logo{font-size:48px;margin-bottom:8px;display:block;filter:drop-shadow(0 0 20px rgba(110,231,183,0.4))}
+h1{font-size:28px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2),var(--accent3));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;letter-spacing:-0.5px;margin-bottom:6px}
+.subtitle{color:var(--text2);font-size:14px;margin-bottom:28px}
+.pin-row{display:flex;gap:12px;justify-content:center;margin-bottom:8px}
+.pin-box{width:58px;height:68px;border:2px solid var(--glass-border);border-radius:16px;background:rgba(255,255,255,0.04);font-size:28px;font-weight:800;color:var(--text);text-align:center;font-family:'SF Mono',ui-monospace,monospace;outline:none;transition:all .2s ease;-webkit-appearance:none;caret-color:var(--accent)}
+.pin-box:focus{border-color:var(--accent);background:rgba(110,231,183,0.06);box-shadow:0 0 20px rgba(110,231,183,0.15)}
+.pin-box.error{border-color:var(--accent3);animation:shake .4s ease}
+@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-6px)}40%,80%{transform:translateX(6px)}}
+.submit-btn{width:100%;padding:16px;border:none;border-radius:16px;font-size:16px;font-weight:700;cursor:pointer;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0a0a1a;margin-top:20px;transition:all .2s ease;font-family:inherit}
+.submit-btn:hover{box-shadow:0 0 24px rgba(110,231,183,0.3);transform:translateY(-1px)}
+.submit-btn:active{transform:scale(0.98)}
+</style>
+</head>
+<body>
+<div class="orb orb-1"></div><div class="orb orb-2"></div>
+<div class="card">
+  <span class="logo">💧</span>
+  <h1>LiquidDrop</h1>
+  <p class="subtitle">Enter the 4-digit PIN to connect</p>
+  <form method="POST" action="/pin" id="pinForm">
+    <div class="pin-row">
+      <input class="pin-box{{ERR_CLASS}}" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d1" id="d1" autofocus autocomplete="off">
+      <input class="pin-box{{ERR_CLASS}}" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d2" id="d2" autocomplete="off">
+      <input class="pin-box{{ERR_CLASS}}" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d3" id="d3" autocomplete="off">
+      <input class="pin-box{{ERR_CLASS}}" type="tel" maxlength="1" inputmode="numeric" pattern="[0-9]" name="d4" id="d4" autocomplete="off">
+    </div>
+    {{MESSAGE}}
+    <button type="submit" class="submit-btn">💧 Connect</button>
+  </form>
+</div>
+<script>
+const boxes=document.querySelectorAll('.pin-box');
+boxes.forEach((b,i)=>{
+  b.addEventListener('input',e=>{
+    b.value=b.value.replace(/[^0-9]/g,'');
+    if(b.value && i<3) boxes[i+1].focus();
+    if([...boxes].every(x=>x.value)) document.getElementById('pinForm').submit();
+  });
+  b.addEventListener('keydown',e=>{
+    if(e.key==='Backspace' && !b.value && i>0){boxes[i-1].focus();boxes[i-1].value='';}
+  });
+  b.addEventListener('paste',e=>{
+    e.preventDefault();
+    const p=(e.clipboardData||window.clipboardData).getData('text').replace(/[^0-9]/g,'');
+    for(let j=0;j<4&&j<p.length;j++){boxes[j].value=p[j];}
+    if(p.length>=4) document.getElementById('pinForm').submit();
+  });
+});
+</script>
+</body>
+</html>

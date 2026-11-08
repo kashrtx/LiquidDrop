@@ -5,15 +5,15 @@
   <br>
   <em>Move files between your phone and computer. Nothing else.</em>
   <br><br>
-  <img src="https://img.shields.io/badge/python-3.7+-blue?style=flat-square&logo=python&logoColor=white">
-  <img src="https://img.shields.io/badge/dependencies-auto--installed-green?style=flat-square">
+  <img src="https://img.shields.io/badge/built%20with-Rust-orange?style=flat-square&logo=rust&logoColor=white">
+  <img src="https://img.shields.io/badge/install-none-green?style=flat-square">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square">
   <img src="https://img.shields.io/badge/license-Apache%202.0-purple?style=flat-square">
 </p>
 
 ---
 
-One Python file. No accounts. No cloud. No install on the receiving device. Run it, scan the QR (or enter the PIN), transfer files.
+One file. Nothing to install. No accounts. No cloud. No app on the receiving device. Double-click it, scan the QR (or enter the PIN), transfer files.
 
 ## Demo Screenshots
 
@@ -35,146 +35,115 @@ One Python file. No accounts. No cloud. No install on the receiving device. Run 
 
 Every other file transfer tool wants you to install an app on both devices. LiquidDrop doesn't. Someone walks up to your desk, scans a QR code with their phone camera, and they're sending files. Done.
 
-## Features
+## Download and run
 
-- Single command to start, browser opens automatically
-- Single-instance protection — a second launch reopens the existing host session instead of starting a duplicate server
-- QR code in your terminal and in the web UI
-- **PIN code join** — 4-digit PIN as a fallback when QR scanning isn't convenient
-- **Stable URLs** — bookmarks and iPhone home screen shortcuts survive server restarts
-- Works both ways: phone to desktop, desktop to phone
-- Drag and drop on desktop, tap to pick on mobile
-- **Host stop control** — the desktop host view includes a clear stop button to shut down the session without using the terminal
-- **Desktop-optimized layout** — wide screens use a cleaner multi-panel layout while the phone view stays unchanged
-- **Extensions tab** - create starter add-ons, open the add-on folder, install JSON add-ons, and manage host-only settings
-- **Add-on framework** - owner/date metadata, manifest diagnostics, load/error status, validated paths, and host-synced shared state across connected devices
-- **Bundled add-ons** - custom backgrounds, document/media preview with zoom/audio visualization, and a configurable status strip with host-synced weather
-- 3+ files? Offers to zip them into one bundle
-- Live upload speed and ETA
-- Streams files in 256KB chunks, so a 10GB file uses the same memory as a 10KB file
-- Threaded server handles multiple connections at once
-- Handles any file type, no size limit
-- Pin it to your iPhone home screen for app-like access
-- Files auto-appear on both devices within seconds
-- **Zero-fail dependency install** — auto-installs everything, even if pip is missing
+Grab the file for your computer from the **Releases** page and open it. That's it — no Python, no pip, no installer.
 
-## Quick Start
+| OS | Download | First launch |
+|---|---|---|
+| Windows | `LiquidDrop-windows-x64.zip` → `LiquidDrop.exe` | SmartScreen may say "unrecognized app": **More info → Run anyway**. Allow it on **Private networks** when the firewall asks (phones can't connect otherwise). |
+| macOS | `LiquidDrop-macos-universal.zip` → `LiquidDrop.app` (Intel + Apple Silicon) | Right-click → **Open** the first time (the app isn't notarized). Allow "find devices on your local network". |
+| Linux | `LiquidDrop-linux-x64.tar.gz` → `liquiddrop` | `./liquiddrop` (static binary, any distro). |
 
-### 1. Clone
+Your browser opens to the host view and LiquidDrop moves into the **system tray** (Windows) or **menu bar** (macOS). The tray menu shows the phone link, PIN and connected devices, and has **Open LiquidDrop**, **Copy phone link**, **Open shared folder** and **Quit**. Hover the icon to see live transfer speed. On Linux it runs in the terminal (the Linux build stays a single static file with no GUI libraries).
+
+Started from a terminal, LiquidDrop keeps printing the QR code and log there as well. Use `--no-tray` to skip the icon.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/liquiddrop.git
-cd liquiddrop
+liquiddrop              # standard mode
+liquiddrop --secure     # HTTPS with a self-signed certificate
+liquiddrop --port 8888  # custom port
+liquiddrop --new-token  # new URL (invalidates old bookmarks)
+liquiddrop --dir D:\Shared --no-browser --no-tray --verbose
 ```
 
-### 2. Run
+### Connect your phone
 
-```bash
-python3 liquiddrop.py              # standard mode, no warnings
-python3 liquiddrop.py --secure     # HTTPS mode, full TLS encryption
-python3 liquiddrop.py --port 8888  # custom port
-python3 liquiddrop.py --new-token  # regenerate URL (invalidates old bookmarks)
-```
-Or open `Run_LiquidDrop` on your specific operating system (macOS, Windows, Linux) for quick run in standard mode.
+**QR code:** point the camera at it, tap the link.
+**PIN:** open `http://<your-ip>:7777` (or `http://liquiddrop.local:7777` on iPhone/Mac/Windows) and enter the 4-digit PIN.
+**Home screen:** Safari → Share → Add to Home Screen. The URL is stable across restarts.
 
+## What's new in v5
 
+v5 is a rewrite in Rust. The speed you'll actually feel comes from a new transfer design:
 
-### 3. Connect your phone
+- **Parallel, resumable uploads.** Files go up three at a time in chunks. If the phone sleeps or Wi-Fi drops, the upload continues where it stopped. Unfinished files never show up half-written in the list.
+- **Instant updates.** One live connection per device replaces the old polling every 2–3 seconds. New files appear immediately and phones use less battery.
+- **Real "download selected".** The computer streams one zip directly (no compression, so it starts instantly). Nothing is buffered in the phone's memory, ZIP64 handles files over 4 GB, and the progress bar is real because the size is known up front.
+- **"Zip & Send" without the memory crash.** Files upload normally and the computer bundles them afterwards.
+- **Resume and seek.** Downloads support byte ranges, so interrupted downloads resume and videos seek properly in the preview player (iPhone Safari needs this).
+- **Thumbnails.** The file list loads small server-made thumbnails (rotated correctly) instead of every full-size photo.
+- **Smarter networking.** Works offline and on hotspots, ignores VPN/Docker adapters, follows you when the laptop changes networks, and the host can pick the network from a menu. The QR updates live.
+- **Lives in the tray.** Double-click and it tucks into the system tray / menu bar with live status, a copy-link button and a clean Quit.
+- **Single file, starts instantly.** UI, add-ons and pdf.js are built into the executable. Secure mode needs no extra libraries.
 
-**Option A — QR Code:** Point your camera at the QR code in the terminal. Tap the link. You're in.
+### Fixes from v4
 
-**Option B — PIN Code:** Open `http://<your-ip>:7777` on any device. Enter the 4-digit PIN shown in the terminal. You're in.
+- Downloading files with non-Latin names (Chinese, Arabic, emoji…) crashed the request.
+- Interrupted uploads left truncated files that looked complete.
+- Two uploads with the same name at the same moment could overwrite each other.
+- JSZip and pdf.js came from CDNs, so zipping and PDF preview failed without internet.
+- With no internet the QR code pointed at `127.0.0.1`.
+- Uploaded HTML/SVG files previewed inline could run scripts with host privileges; previews are now sandboxed.
+- The server spoke HTTP/1.0, so every request opened a new connection.
 
-**Optional:** In Safari, tap Share > Add to Home Screen to make it feel like a native app. The URL is stable — it will work even after restarting the server.
+### Upgrading from v4
 
-### Requirements
-
-- Python 3.7+
-- `qrcode` library (auto-installs on first run, or `pip install qrcode[pil]`)
-- `cryptography` library if using `--secure` (also auto-installs)
-
-All dependencies auto-install on first run. If pip itself is missing, LiquidDrop will bootstrap it automatically.
-
-## How It Works
-
-```
-┌──────────────┐         WiFi          ┌──────────────┐
-│   Desktop    │ <--- same network --> │   iPhone     │
-│              │                       │              │
-│  python3     │   http://10.x.x.x     │  Safari /    │
-│  liquiddrop  │   :7777/token         │  Home Screen │
-│  .py         │ <------------------>  │              │
-│              │                       │  Or enter    │
-│ ~/LiquidDrop/|  <-- files land here  │  PIN: 1234   │
-└──────────────┘                       └──────────────┘
-```
-
-**Phone to Desktop:** Tap "Send Files", pick from your camera roll or files. They show up in `~/LiquidDrop/`.
-
-**Desktop to Phone:** Drag files onto the browser page. Download them on your phone.
+Nothing to migrate. v5 uses the same `~/LiquidDrop` folder, `.token`, port, URL layout, extension folders, settings and certificates, so bookmarks, home-screen shortcuts and add-ons keep working. `liquiddrop.py` stays in the repo as a fallback.
 
 ## Security
 
-Two modes depending on where you are.
-
-### Standard (default)
-
-For home and office WiFi. No browser warnings, totally seamless.
-
-| What | How |
+| Standard mode | Secure mode (`--secure`) |
 |---|---|
-| Secret URL token | Random token persisted across restarts. Can't be guessed. |
-| PIN entry | 4-digit PIN derived from the token. Shown in terminal and web UI. |
-| LAN only | Never touches the internet. |
-| WiFi encryption | Your router's WPA2/WPA3 already encrypts local traffic. |
-| Sandboxed | All files locked to `~/LiquidDrop/`. Path traversal blocked. |
-| Regenerate | Run `--new-token` to invalidate old URLs and start fresh. |
+| Secret URL token (persisted) | Everything on the left, plus |
+| 4-digit PIN with lockout after 5 wrong tries | HTTPS (TLS 1.2+, HTTP/2) |
+| LAN only, no external calls | ECDSA P-256 self-signed cert, generated locally, valid 1 year |
+| Files sandboxed to `~/LiquidDrop` (no traversal, no hidden files, no symlink escapes) | Fingerprint shown in terminal and web UI |
+| Previews sandboxed, `nosniff`, `no-referrer` | Typing `http://` redirects to `https://` |
 
-### Secure (`--secure` flag)
+The only optional outside request is the weather widget in the Status Strip add-on (Open-Meteo), which you can turn off.
 
-For shared or untrusted networks like dorms, coworking spaces, coffee shops.
+## Extensions
 
-| What | How |
-|---|---|
-| Everything above | Plus... |
-| HTTPS/TLS 1.2+ | All traffic encrypted between your browser and the server. |
-| ECDSA P-256 cert | Auto-generated locally on first run. Valid for 1 year. |
-| Fingerprint shown | In terminal and web UI so you can verify the connection. |
-| Key file locked | Private key set to owner-only permissions. |
+Open the **Extensions** tab on the host to create, install, toggle and configure add-ons. User add-ons live in `~/LiquidDrop/extensions/<id>/`. See [assets/readme/EXTENSIONS.md](assets/readme/EXTENSIONS.md).
 
-The `--secure` flag will show a one-time browser warning because the cert is self-signed. Tap Advanced > Proceed. This is normal.
+v5 adds live events to the add-on API (existing add-ons keep working unchanged):
 
-No accounts. No analytics. No telemetry. No external calls.
-
-## Extensions and Mods
-
-Open the **Extensions** tab in the host web view to manage add-ons. Host users can create a starter add-on, open the add-on folder, install JSON add-ons, toggle add-ons, and configure settings that sync to connected devices. Mobile users can run enabled add-ons but cannot change add-on management settings.
-
-LiquidDrop includes bundled extensions for custom image/GIF backgrounds, an in-page document/media preview player with zoom, iPhone-friendly PDF/document scrolling, DOCX/text support, calmer audio visualization, and a configurable modern status widget strip for devices, transfer speed, and host-synced weather.
-
-User add-ons live in `~/LiquidDrop/extensions/<extension-id>/` with a `manifest.json` and optional `client.js`/`style.css`. See [EXTENSIONS.md](EXTENSIONS.md) for the create flow, manifest format, shared-state API, one-file install example, safety model, and testing checklist.
-
-## Config
-
-Edit the top of `liquiddrop.py`:
-
-```python
-PORT = 7777                  # change the port
-UPLOAD_DIR = "~/LiquidDrop"  # change where files go
+```js
+const api = window.LiquidDropExtensions;
+api.on('files', list => {});        // file list changed
+api.on('status', s => {});          // devices + speed, every 2s
+api.on('settings', ({id}) => {});   // host changed an add-on's settings
+api.on('state', ({id}) => {});      // shared state changed
+api.on('live', ({connected}) => {});
+await api.uploadFiles(fileList);    // uses the resumable engine
+api.downloadUrl(name); api.previewUrl(name); api.thumbnailUrl(name);
 ```
 
-## Project Structure
+## Building from source
+
+Install Rust from <https://rustup.rs>, then:
+
+```bash
+./scripts/fetch-vendor.sh      # optional: bundle pdf.js for offline PDF preview (Windows: scripts\fetch-vendor.ps1)
+cargo build --release          # → target/release/liquiddrop(.exe)
+cargo test --release           # unit + end-to-end tests
+```
+
+Optional features (on by default): `mdns` (liquiddrop.local), `thumbnails`, and `tray` (Windows and macOS only). Build without them using `cargo build --release --no-default-features`.
+
+To publish downloads, push a tag such as `v5.0.0`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
+
+## Project structure
 
 ```
-liquiddrop/
-|-- liquiddrop.py       # core app and extension runtime
-|-- assets/extensions/  # bundled extensions
-|-- EXTENSIONS.md       # extension authoring guide
-|-- README.md
-`-- LICENSE
+src/            Rust app (server, uploads, zip streaming, extensions, TLS, ...)
+ui/             web UI (embedded into the binary at build time)
+assets/extensions/  bundled add-ons (also embedded)
+packaging/      app icons, macOS Info.plist
+tests/          end-to-end tests
+liquiddrop.py   legacy v4 (Python), kept as a fallback
 ```
-
-The core app is still one Python file. Bundled extensions are plain manifest/script folders so users can copy them as examples.
 
 ## License
 

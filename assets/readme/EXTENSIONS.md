@@ -201,3 +201,17 @@ The Extensions tab can install a single JSON file. Use `client.inline_js` when y
 ```
 
 Uploaded add-ons are installed disabled. Turn them on from the Extensions tab, then LiquidDrop reloads so the script can be loaded cleanly.
+
+## Live events (LiquidDrop 5)
+
+LiquidDrop 5 keeps one live connection open per device. Instead of polling, subscribe:
+
+```js
+const off = api.on('settings', (e) => { if (e.id === id) refresh(); });
+api.on('status', (s) => render(s));      // pushed every 2 seconds
+api.on('files', (files) => {});
+api.on('state', (e) => {});
+api.on('live', (e) => console.log('connected:', e.connected));
+```
+
+`api.on` returns an unsubscribe function. Check `if (api.on)` first if your add-on should also run on LiquidDrop 4.
