@@ -268,8 +268,7 @@ function grabPoster(src){
    Each file goes up in chunks to /uploads/{id}. If the connection drops (phone
    sleeps, Wi-Fi hiccup) the upload resumes from the server's offset. Files
    only appear in the list once complete. */
-/* 8 MB chunks: small enough that a dropped connection costs little and
-   recovers fast, big enough that per-request overhead is negligible. */
+/* Healthy files stream natively. Recovery uses bounded 8 MiB buffers. */
 /* Two files at a time: quick for photo batches, gentle on phone Wi-Fi. */
 const UPLOAD_PARALLEL=2;
 const DEVICE_ID=(()=>{
@@ -320,22 +319,14 @@ async function apiJSON(method,url,body){
     return data;
   },url.includes('/uploads')?UT.requestMs:120000,()=>controller.abort());
 }
-async function sliceReadable(file,offset){
-  try{
-    const end=Math.min(file.size,offset+1);
-    if(end<=offset) return true;
-    await withDeadline(()=>file.slice(offset,end).arrayBuffer(),UT.readMs);
-    return true;
-  }catch(e){return false;}
-}
 function retryable(e){
   return !e.status||e.status===408||e.status===409||(e.status>=500&&e.status!==507);
 }
-/* Read bounded pieces before sending. This avoids handing Safari's network
-   process a live Files-provider-backed video, and limits memory to one piece
-   per worker. Progress comes from both the browser and the computer. */
+/* Stream directly from the file on healthy connections: no JavaScript copy
+   and no stop-and-wait request per 8 MiB. If Safari's Files provider stalls,
+   switch that file to the bounded in-memory path that works around it. */
 const UPLOAD_CHUNK=8*1024*1024;
-const UT=Object.assign({stallMs:30000,pollMs:3000,slowMs:8000,requestMs:15000,readMs:60000},window.LD_UPLOAD_TIMING||{});
+const UT=Object.assign({stallMs:30000,nativeStallMs:8000,pollMs:3000,slowMs:8000,requestMs:15000,readMs:60000},window.LD_UPLOAD_TIMING||{});
 const activeXhrs=new Set();
 let uploadKick=0;
 function waitOrKick(ms){
@@ -349,9 +340,13 @@ async function serverOffset(id){
   return Number(st.offset)||0;
 }
 async function sendFrom(id,file,offset,task){
-  const end=Math.min(file.size,offset+UPLOAD_CHUNK);
-  task.state='reading';
-  const body=await withDeadline(()=>file.slice(offset,end).arrayBuffer(),UT.readMs);
+  const end=task.buffered?Math.min(file.size,offset+UPLOAD_CHUNK):file.size;
+  let body=offset===0&&!task.buffered?file:file.slice(offset,end);
+  if(task.buffered){
+    task.state='reading';
+    try{body=await withDeadline(()=>body.arrayBuffer(),UT.readMs);}
+    catch(e){e.unreadable=true;throw e;}
+  }
   task.state='sending';
   return new Promise((res,rej)=>{
     const xhr=new XMLHttpRequest();
@@ -359,20 +354,22 @@ async function sendFrom(id,file,offset,task){
     let settled=false,reason='',lastGrowth=Date.now(),clientLoaded=0,serverSeen=offset,polling=false;
     const succeed=d=>{if(settled) return;settled=true;cleanup();res(d);};
     const fail=e=>{if(settled) return;settled=true;cleanup();rej(e);};
-    const poll=setInterval(async()=>{
+    const pollOffset=async()=>{
+      if(polling||settled||document.hidden) return;
+      polling=true;
+      try{
+        const so=await serverOffset(id);
+        if(settled) return;
+        if(so>=end){succeed({offset:end});xhr.abort();return;}
+        if(so>serverSeen){serverSeen=so;lastGrowth=Date.now();task.serverBytes=so-offset;}
+      }catch(_){}finally{polling=false;}
+    };
+    const poll=setInterval(()=>{
       if(document.hidden){lastGrowth=Date.now();return;}
-      if(!polling){
-        polling=true;
-        try{
-          const so=await serverOffset(id);
-          if(settled) return;
-          if(so>=end){succeed({offset:end});xhr.abort();return;}
-          if(so>serverSeen){serverSeen=so;lastGrowth=Date.now();task.serverBytes=so-offset;}
-        }catch(_){}
-        polling=false;
-      }
+      pollOffset();
       task.quietMs=Date.now()-lastGrowth;
-      if(task.quietMs>UT.stallMs){reason='stalled';const e=new Error(reason);e.stallReason=reason;fail(e);xhr.abort();}
+      const deadline=task.buffered?UT.stallMs:Math.min(UT.stallMs,UT.nativeStallMs);
+      if(task.quietMs>deadline){reason='stalled';const e=new Error(reason);e.stallReason=reason;fail(e);xhr.abort();}
     },UT.pollMs);
     const cleanup=()=>{clearInterval(poll);activeXhrs.delete(xhr);task.quietMs=0;};
     xhr.open('PUT',API+'/uploads/'+encodeURIComponent(id)+'?offset='+offset);
@@ -382,6 +379,7 @@ async function sendFrom(id,file,offset,task){
       task.clientBytes=e.loaded;
       task.state='sending';
     };
+    xhr.upload.onload=()=>pollOffset();
     xhr.onload=()=>{
       let d={};
       try{d=JSON.parse(xhr.responseText||'{}');}catch(e){}
@@ -420,12 +418,11 @@ async function uploadOne(file,task){
         attempt=0;task.attempt=0;
       }catch(e){
         if(!retryable(e)) throw e;
-        if(!e.status&&e.stallReason!=='manual'&&!(await sliceReadable(file,offset))){
-          const err=new Error('unreadable');err.unreadable=true;throw err;
-        }
         if(++attempt>12) throw e;
+        const fallback=!task.buffered&&e.stallReason!=='manual';
+        if(fallback) task.buffered=true;
         task.state='reconnecting';task.attempt=attempt;
-        if(e.stallReason!=='manual') await waitOrKick(Math.min(8000,400*2**attempt));
+        if(!fallback&&e.stallReason!=='manual') await waitOrKick(Math.min(8000,400*2**attempt));
         try{offset=await serverOffset(id);}catch(_){}
       }
       task.confirmed=offset;task.clientBytes=0;task.serverBytes=0;

@@ -71,15 +71,16 @@ class FakeXHR {
   open(m, url) { this.url = new URL(url, 'http://x'); }
   abort() { if (this.done) return; this.done = true; server.log.push('abort#' + this.n); setTimeout(() => this.onabort && this.onabort(), 0); }
   async send(body) {
-    assert.ok(body instanceof ArrayBuffer, 'read Files-provider data before passing it to XHR');
-    assert.ok(body.byteLength <= 8 * 1024 * 1024, 'bound per-request memory');
+    assert.ok(body instanceof ArrayBuffer || body instanceof Blob);
+    if(body instanceof ArrayBuffer) assert.ok(body.byteLength <= 8 * 1024 * 1024, 'bound fallback memory');
     const id = this.url.pathname.split('/')[3];
     const offset = Number(this.url.searchParams.get('offset'));
     this.n = ++server.puts;
     const after = server.plan.after;
-    const mode = server.plan[this.n] || (after && this.n > after.n ? after.mode : 'ok');
+    const mode = (server.plan.providerBroken && body instanceof Blob ? 'dead-provider' : null) || server.plan[this.n] || (after && this.n > after.n ? after.mode : 'ok');
     server.log.push(this.n + ':' + mode + '@' + offset);
-    const buf = Buffer.from(body instanceof ArrayBuffer ? body : await body.arrayBuffer());
+    if(mode === 'dead-provider') return; // native File-backed request never starts
+    const buf = Buffer.from(body instanceof ArrayBuffer ? body : await Blob.prototype.arrayBuffer.call(body));
     if (server.parts[id].length > offset) server.parts[id] = server.parts[id].subarray(0, offset);
     let sent = 0;
     const step = 256 * 1024;
@@ -129,12 +130,16 @@ async function scenario(name, plan) {
   if (plan.mixed) {
     files.splice(0, files.length, ...['txt','pdf','doc','ipa','mp4','mp4'].map((ext,i) => new File([photos[i]], 'file'+i+'.'+ext)));
   }
-  const expected = await Promise.all(files.map(async f => [f.name, Buffer.from(await f.arrayBuffer())]));
+  if(plan.healthy) {
+    files[0].arrayBuffer = () => { throw new Error('healthy files must stream without a JavaScript copy'); };
+  }
+  const expected = await Promise.all(files.map(async f => [f.name, Buffer.from(await Blob.prototype.arrayBuffer.call(f))]));
   const t0 = Date.now();
   const names = await api.uploadFiles(files);
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   const ok = names.length === files.length && expected.every(([name, data]) => server.files[name]?.equals(data));
   console.log((ok ? 'PASS ' : 'FAIL ') + name + ' — '+files.length+' files in ' + secs + 's; requests: ' + server.log.join(' '));
+  if(plan.healthy) assert.equal(server.puts,1,'healthy video needs one streamed request');
   clearTimeout(guard);
   if (!ok) { console.log('toasts:', toasts); process.exit(1); }
 }
@@ -151,7 +156,9 @@ async function scenario(name, plan) {
     ['single local MP4: finalization reply lost after commit', { solo: true, hang: 'complete' }],
     ['single local MP4: finalization JSON never arrives', { solo: true, hang: 'json' }],
     ['single local MP4: status request hangs during recovery', { solo: true, 1: 'dead', hang: 'status' }],
-    ['local file read stalls once before sending', { solo: true, readHang: true }],
+    ['local file read stalls once during buffered recovery', { solo: true, readHang: true, providerBroken: true }],
+    ['native file provider stalls; buffered fallback completes', { solo: true, providerBroken: true }],
+    ['healthy MP4 streams without JavaScript copies or chunk round trips', {solo:true,healthy:true}],
     ['mixed documents and multiple MP4s recover automatically', { mixed: true, 5: 'dead', 6: 'lost-reply' }],
   ];
   const only = process.env.SCENARIO;

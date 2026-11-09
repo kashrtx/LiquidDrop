@@ -1,5 +1,13 @@
 # Changelog
 
+## 5.0.3
+
+- Restore native file streaming for healthy connections. Large videos no longer copy every 8 MiB into JavaScript memory and wait for a separate upload response per piece.
+- Automatically switch an interrupted native upload to the bounded 8 MiB recovery path, resuming from the computer's saved offset. The 5.0.2 request deadlines and finalization fixes remain in place.
+- Check server progress immediately when the browser finishes sending, reducing waits when the upload response is lost.
+- Remove the extra file-read probe on network errors; transient read failures remain retryable.
+- Add regressions for stalled native file providers and healthy uploads that must avoid JavaScript file reads and use one request. Add an optional 128 MiB browser throughput benchmark.
+
 ## 5.0.2
 
 - Bound upload creation, status, and finalization requests, including response-body reads. Missing replies now trigger automatic retries instead of waiting indefinitely.
