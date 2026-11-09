@@ -7,6 +7,8 @@ use std::path::PathBuf;
 /// Comes from `version` in Cargo.toml, so there is only one place to change it.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_PORT: u16 = 7777;
+/// Changes with every build that changes the UI (see build.rs).
+pub const BUILD_ID: &str = env!("LIQUIDDROP_BUILD_ID");
 
 pub const CHUNK: usize = 256 * 1024;
 pub const MAX_JSON_BODY: usize = 512 * 1024;

@@ -54,6 +54,7 @@ pub fn index(app: &App, is_host: bool, nonce: &str) -> String {
         .replace("{{PIN_URL}}", &html_escape(&app.pin_url()))
         .replace("{{HOST_SECTION}}", if is_host { HOST_SECTION } else { "" })
         .replace("{{NONCE}}", nonce)
+        .replace("{{BUILD_ID}}", crate::config::BUILD_ID)
         // Inserted last so nothing inside the script is ever treated as a placeholder.
         .replace("{{APP_JS}}", assets::get_str("ui/app.js"))
 }

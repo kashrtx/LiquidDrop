@@ -28,6 +28,25 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Resolves as soon as a newer request for the same upload has arrived.
+async fn superseded(rx: &mut tokio::sync::watch::Receiver<u64>, mine: u64) {
+    loop {
+        if *rx.borrow_and_update() != mine {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            return; // upload finished or cancelled
+        }
+    }
+}
+
+fn superseded_resp() -> Resp {
+    json(
+        StatusCode::CONFLICT,
+        &json!({"error": "Replaced by a newer request.", "superseded": true}),
+    )
+}
+
 pub fn valid_upload_id(id: &str) -> bool {
     (8..=80).contains(&id.len())
         && id
@@ -66,6 +85,7 @@ pub async fn start(app: &Arc<App>, body: Value) -> Resp {
     let part = part_path(app, &id);
     let meta = meta_path(app, &id);
 
+    let _claim = app.claim_upload(&id);
     let lock = app.upload_lock(&id);
     let _guard = match tokio::time::timeout(Duration::from_secs(10), lock.lock_owned()).await {
         Ok(g) => g,
@@ -135,11 +155,21 @@ pub async fn put_chunk(app: &Arc<App>, id: &str, query: &str, body: Incoming) ->
     let size = value_u64(meta.get("size")).unwrap_or(0);
     let part = part_path(app, id);
 
+    // A phone that lost its connection retries on a new one. The old request
+    // may still be open on our side (or waiting for the lock), so the newest
+    // request takes over immediately instead of queueing behind dead ones.
+    let (mine, mut gen_rx) = app.claim_upload(id);
     let lock = app.upload_lock(id);
-    let _guard = match tokio::time::timeout(Duration::from_secs(15), lock.lock_owned()).await {
-        Ok(g) => g,
-        Err(_) => return json_error(StatusCode::CONFLICT, "Upload is busy."),
+    let _guard = tokio::select! {
+        g = lock.lock_owned() => g,
+        _ = superseded(&mut gen_rx, mine) => return superseded_resp(),
+        _ = tokio::time::sleep(Duration::from_secs(20)) => {
+            return json_error(StatusCode::CONFLICT, "Upload is busy.")
+        }
     };
+    if *gen_rx.borrow() != mine {
+        return superseded_resp(); // never let a stale request truncate the file
+    }
 
     let mut file = match tokio::fs::OpenOptions::new().write(true).open(&part).await {
         Ok(f) => f,
@@ -169,7 +199,14 @@ pub async fn put_chunk(app: &Arc<App>, id: &str, query: &str, body: Incoming) ->
     let mut written: u64 = 0;
     let mut failure: Option<(StatusCode, String)> = None;
     loop {
-        let next = match tokio::time::timeout(BODY_IDLE_TIMEOUT, body.frame()).await {
+        let waited = tokio::select! {
+            r = tokio::time::timeout(BODY_IDLE_TIMEOUT, body.frame()) => r,
+            _ = superseded(&mut gen_rx, mine) => {
+                failure = Some((StatusCode::CONFLICT, "Replaced by a newer request.".to_string()));
+                break;
+            }
+        };
+        let next = match waited {
             Err(_) => {
                 failure = Some((StatusCode::REQUEST_TIMEOUT, "Upload stalled.".to_string()));
                 break;
@@ -211,7 +248,7 @@ pub async fn put_chunk(app: &Arc<App>, id: &str, query: &str, body: Incoming) ->
     if failure.is_none() && new_offset != offset + written {
         failure = Some((StatusCode::INSUFFICIENT_STORAGE, "Could not save the file.".to_string()));
     }
-    if let Some((status, msg)) = &failure {
+    if let Some((status, msg)) = failure.as_ref().filter(|(s, _)| *s != StatusCode::CONFLICT) {
         let name = meta.get("name").and_then(|v| v.as_str()).unwrap_or(id);
         say!(
             "  {}⚠  Upload interrupted:{} {} at {} ({} {}) — the device will resume",
@@ -250,6 +287,7 @@ pub async fn complete(app: &Arc<App>, id: &str) -> Resp {
     let name = files::sanitize_filename(meta.get("name").and_then(|v| v.as_str()).unwrap_or(""));
     let part = part_path(app, id);
 
+    let _claim = app.claim_upload(id);
     let lock = app.upload_lock(id);
     let _guard = match tokio::time::timeout(Duration::from_secs(15), lock.lock_owned()).await {
         Ok(g) => g,
@@ -283,6 +321,7 @@ pub async fn cancel(app: &Arc<App>, id: &str) -> Resp {
     if !valid_upload_id(id) {
         return json_error(StatusCode::BAD_REQUEST, "Invalid upload id.");
     }
+    let _claim = app.claim_upload(id);
     let lock = app.upload_lock(id);
     let _guard = tokio::time::timeout(Duration::from_secs(5), lock.lock_owned()).await;
     let _ = tokio::fs::remove_file(part_path(app, id)).await;

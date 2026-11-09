@@ -354,3 +354,40 @@ fn live_events_and_shutdown() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// The iPhone case: a chunk's connection goes silent mid-body (Wi-Fi power
+/// saving). The phone gives up and retries on a new connection. The retry must
+/// go through right away instead of waiting behind the dead request.
+#[test]
+fn stalled_chunk_never_blocks_the_retry() {
+    let srv = start("zombie");
+    let t = srv.token.clone();
+    let id = "zombie-test-0001";
+    let data: Vec<u8> = (0..400_000u32).map(|i| (i % 253) as u8).collect();
+    let r = post_json(&srv, &format!("/{}/uploads", t), serde_json::json!({"id": id, "name": "clip.mov", "size": data.len()}));
+    assert_eq!(r.status, 200, "{}", r.text());
+
+    // Dead request: headers say 400 KB, only 60 KB ever arrives, socket stays open.
+    let mut zombie = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+    zombie
+        .write_all(format!("PUT /{}/uploads/{}?offset=0 HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n", t, id, data.len()).as_bytes())
+        .unwrap();
+    zombie.write_all(&data[..60_000]).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Retry on a fresh connection, like the phone does.
+    let started = Instant::now();
+    let st = get(&srv, &format!("/{}/uploads/{}", t, id)).json();
+    let offset = st["offset"].as_u64().unwrap() as usize;
+    let r = request(srv.port, "PUT", &format!("/{}/uploads/{}?offset={}", t, id, offset), &[], &data[offset..]);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json()["offset"], data.len());
+    assert!(started.elapsed() < Duration::from_secs(5), "retry waited {:?} behind the dead request", started.elapsed());
+
+    // The dead request must not have damaged the file.
+    let r = request(srv.port, "POST", &format!("/{}/uploads/{}/complete", t, id), &[], b"");
+    assert_eq!(r.status, 200, "{}", r.text());
+    let got = get(&srv, &format!("/{}/download/clip.mov", t));
+    assert_eq!(got.body, data);
+    drop(zombie);
+}

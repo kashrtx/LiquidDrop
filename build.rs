@@ -47,6 +47,22 @@ fn main() {
     }
     entries.sort();
 
+    // Build id: hash of everything embedded + the version. Open pages compare
+    // it with the server's and reload themselves after an update.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    feed(env::var("CARGO_PKG_VERSION").unwrap_or_default().as_bytes());
+    for (key, path) in &entries {
+        feed(key.as_bytes());
+        feed(&fs::read(path).unwrap_or_default());
+    }
+    println!("cargo:rustc-env=LIQUIDDROP_BUILD_ID={:016x}", h);
+
     let mut code = String::from("pub static EMBEDDED: &[(&str, &[u8])] = &[\n");
     for (key, path) in &entries {
         code.push_str(&format!("    ({:?}, include_bytes!({:?})),\n", key, path));

@@ -3,7 +3,7 @@
 //! extension API can subscribe to changes.
 
 use crate::app::App;
-use crate::config::{APP_VERSION, STATUS_CLIENT_TTL_SECS, STATUS_SPEED_WINDOW_SECS};
+use crate::config::{APP_VERSION, BUILD_ID, STATUS_CLIENT_TTL_SECS, STATUS_SPEED_WINDOW_SECS};
 use crate::files;
 use crate::web::{response, set_header, Resp};
 use crate::util;
@@ -231,7 +231,7 @@ pub fn sse(app: Arc<App>, ip: IpAddr) -> Resp {
     app.stats.live_enter(ip);
     let hello = format!(
         "retry: 2000\nevent: hello\ndata: {}\n\n",
-        json!({ "version": APP_VERSION, "status": app.stats.snapshot() })
+        json!({ "version": APP_VERSION, "build": BUILD_ID, "status": app.stats.snapshot() })
     );
     let mut ping = tokio::time::interval(Duration::from_secs(15));
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -34,6 +34,29 @@ function showShutdownScreen(){
   $('#confirmOverlay').classList.remove('show');
   $('#zipModal').classList.remove('show');
   screen.classList.add('show');
+  waitForServerThenReload();
+}
+/* When LiquidDrop starts again, pages left open reload themselves, so they
+   always run the code of the LiquidDrop that is actually running. */
+let comebackTimer=null;
+function waitForServerThenReload(){
+  if(comebackTimer) return;
+  comebackTimer=setInterval(async()=>{
+    try{
+      const r=await fetch(API+'/status',{cache:'no-store'});
+      if(r.ok){clearInterval(comebackTimer);location.reload();}
+    }catch(_){}
+  },3000);
+}
+const PAGE_BUILD=(document.querySelector('meta[name="liquiddrop-build"]')||{}).content||'';
+let reloadPending=false;
+function reloadForUpdate(){
+  if(uploadState.batches>0){
+    if(!reloadPending) toast('LiquidDrop was updated — refreshing after this upload','success');
+    reloadPending=true;
+    return;
+  }
+  location.reload();
 }
 
 const stopServerBtn=$('#stopServerBtn');
@@ -393,6 +416,10 @@ async function uploadOne(file,task){
   while(true){
     try{return await apiJSON('POST',API+'/uploads/'+encodeURIComponent(id)+'/complete');}
     catch(e){
+      // Computer says part of the file is missing: go back and send the rest.
+      if(e.status===409&&e.data&&typeof e.data.offset==='number'&&e.data.offset<file.size){
+        return await uploadOne(file,task);
+      }
       if(!retryable(e)||++attempt>8) throw e;
       task.state='reconnecting';
       await waitOrKick(800*attempt);
@@ -519,6 +546,7 @@ async function uploadFiles(files,opts){
   }
   uploadState.batches--;
   finishUploadUI();
+  if(reloadPending&&uploadState.batches===0) setTimeout(()=>location.reload(),1200);
   loadFiles();
   return names;
 }
@@ -1302,6 +1330,7 @@ function connectLive(){
     setLive(true);
     const d=parseData(e);
     if(d.status){lastStatus=d.status;emitExt('status',d.status);}
+    if(d.build&&PAGE_BUILD&&d.build!==PAGE_BUILD){reloadForUpdate();return;}
     if(wasDown) scheduleFiles();
   });
   es.addEventListener('files',scheduleFiles);

@@ -35,6 +35,9 @@ pub struct App {
     pub hub: Hub,
     pub ext_lock: Mutex<()>,
     pub upload_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Newest request number per upload. A new request for the same upload
+    /// cancels older ones immediately instead of queueing behind them.
+    pub upload_gens: Mutex<HashMap<String, Arc<watch::Sender<u64>>>>,
     /// Recently finished uploads (id -> final name, size), for retried "complete" calls.
     pub completed: Mutex<HashMap<String, (String, u64, std::time::Instant)>>,
     pub finalize_lock: tokio::sync::Mutex<()>,
@@ -73,6 +76,7 @@ impl App {
             ext_lock: Mutex::new(()),
             upload_locks: Mutex::new(HashMap::new()),
             completed: Mutex::new(HashMap::new()),
+            upload_gens: Mutex::new(HashMap::new()),
             finalize_lock: tokio::sync::Mutex::new(()),
             zip_tickets: Mutex::new(HashMap::new()),
             shutdown_tx,
@@ -267,6 +271,29 @@ impl App {
         if let Ok(mut m) = self.upload_locks.lock() {
             m.remove(id);
         }
+        if let Ok(mut m) = self.upload_gens.lock() {
+            m.remove(id);
+        }
+    }
+
+    /// Register a new request for this upload. Every older request for the
+    /// same upload sees the change and stops at once (see `superseded`).
+    pub fn claim_upload(&self, id: &str) -> (u64, watch::Receiver<u64>) {
+        let tx = {
+            let mut m = match self.upload_gens.lock() {
+                Ok(m) => m,
+                Err(p) => p.into_inner(),
+            };
+            m.entry(id.to_string())
+                .or_insert_with(|| Arc::new(watch::channel(0u64).0))
+                .clone()
+        };
+        let mut mine = 0u64;
+        tx.send_modify(|g| {
+            *g += 1;
+            mine = *g;
+        });
+        (mine, tx.subscribe())
     }
 
     pub fn subscribe_shutdown(&self) -> watch::Receiver<bool> {
