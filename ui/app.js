@@ -270,7 +270,8 @@ function grabPoster(src){
    only appear in the list once complete. */
 /* 8 MB chunks: small enough that a dropped connection costs little and
    recovers fast, big enough that per-request overhead is negligible. */
-const UPLOAD_PARALLEL=3,UPLOAD_CHUNK=8*1024*1024;
+/* Two files at a time: quick for photo batches, gentle on phone Wi-Fi. */
+const UPLOAD_PARALLEL=2;
 const DEVICE_ID=(()=>{
   try{
     let d=localStorage.getItem('ld-device');
@@ -282,15 +283,17 @@ const uploadState={batches:0,total:0,doneBytes:0,files:0,done:0,failed:0,current
 let uploadTimer=null;
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+/* Every send gets its own upload id. Ids used to be derived from name + size +
+   modified date: photos from the iPhone picker get a new date each time, but
+   videos and documents keep theirs, so re-sending one reused the id of an
+   earlier attempt and collided with what was left of it on the computer. */
 function uploadIdFor(file){
-  const s=file.name+'|'+file.size+'|'+(file.lastModified||0);
-  let h1=0x811c9dc5,h2=0x9e3779b9;
-  for(let i=0;i<s.length;i++){
-    const c=s.charCodeAt(i);
-    h1=Math.imul(h1^c,16777619)>>>0;
-    h2=Math.imul(h2+c,2246822507)>>>0;
-  }
-  return ('u'+DEVICE_ID+'-'+h1.toString(36)+h2.toString(36)).replace(/[^A-Za-z0-9_-]/g,'').slice(0,80);
+  const s=file.name+'|'+file.size;
+  let h=0x811c9dc5;
+  for(let i=0;i<s.length;i++) h=Math.imul(h^s.charCodeAt(i),16777619)>>>0;
+  const r=Array.from(crypto.getRandomValues?crypto.getRandomValues(new Uint32Array(2)):[Math.random()*4294967296>>>0,Date.now()>>>0])
+    .map(n=>n.toString(36)).join('');
+  return ('u'+DEVICE_ID+'-'+h.toString(36)+'-'+r).replace(/[^A-Za-z0-9_-]/g,'').slice(0,80);
 }
 async function apiJSON(method,url,body){
   const opts={method,cache:'no-store'};
@@ -312,17 +315,19 @@ async function sliceReadable(file,offset){
 function retryable(e){
   return !e.status||e.status===408||e.status===409||(e.status>=500&&e.status!==507);
 }
-/* ---- Stall-proof sending ----
-   1. Each chunk is read into memory first. Sending a File slice directly lets
-      iPhone Safari stream it lazily from the Photos library, and for videos
-      that stream can hang forever without an error. A plain buffer always sends
-      (and an unreadable file fails immediately with a clear message).
-   2. A watchdog aborts any request that shows no progress and retries it on a
-      fresh connection. The "never started" timeout adapts (8s, 8s, 15s, 30s) so a
-      slow-but-working network is never cut off over and over.
-   3. Tapping the progress bar retries stalled uploads immediately. */
-const UPLOAD_STALL_MS=20000;
-const FIRST_PROGRESS_MS=[8000,8000,15000,30000];
+/* ---- Sending a file ----
+   Each file goes up as ONE streamed request (the browser reads the file
+   itself, exactly like v4 did). Chunking, reading pieces into memory and
+   judging "stalls" from the browser's progress events all proved unreliable
+   on iPhone: Safari often reports no upload progress at all for a while, so
+   healthy uploads were being cancelled and restarted until you tapped the bar.
+
+   Progress and stall detection now come from the COMPUTER: while a request is
+   running we ask it every few seconds how many bytes it has saved. Only if
+   neither the computer nor the browser has seen any new bytes for 30 seconds
+   is the request treated as dead, and then the upload continues from exactly
+   what the computer has (nothing is sent twice). */
+const UT=Object.assign({stallMs:30000,pollMs:3000,slowMs:8000},window.LD_UPLOAD_TIMING||{});
 const activeXhrs=new Set();
 let uploadKick=0;
 function waitOrKick(ms){
@@ -331,36 +336,35 @@ function waitOrKick(ms){
     const iv=setInterval(()=>{if(uploadKick!==k||Date.now()-t0>=ms){clearInterval(iv);res();}},200);
   });
 }
-async function readChunk(file,offset,end){
-  let timer=null;
-  const timeout=new Promise((_,rej)=>{timer=setTimeout(()=>rej(new Error('read timeout')),30000);});
-  try{
-    return await Promise.race([file.slice(offset,end).arrayBuffer(),timeout]);
-  }catch(e){
-    const err=new Error('unreadable');err.unreadable=true;throw err;
-  }finally{clearTimeout(timer);}
+async function serverOffset(id){
+  const st=await apiJSON('GET',API+'/uploads/'+encodeURIComponent(id));
+  return Number(st.offset)||0;
 }
-function putChunk(id,offset,data,task){
+function sendFrom(id,file,offset,task){
   return new Promise((res,rej)=>{
     const xhr=new XMLHttpRequest();
     activeXhrs.add(xhr);
-    const firstMs=FIRST_PROGRESS_MS[Math.min(task.slowRetries||0,FIRST_PROGRESS_MS.length-1)];
-    let started=false,last=Date.now(),reason='';
-    const watchdog=setInterval(()=>{
-      if(document.hidden){last=Date.now();return;}
-      const idle=Date.now()-last;
-      if(!started&&idle>firstMs){reason='no-start';xhr.abort();}
-      else if(started&&idle>UPLOAD_STALL_MS){reason='stalled';xhr.abort();}
-    },1000);
-    const cleanup=()=>{clearInterval(watchdog);activeXhrs.delete(xhr);};
+    let reason='',lastGrowth=Date.now(),clientLoaded=0,serverSeen=offset,polling=false;
+    const poll=setInterval(async()=>{
+      if(document.hidden){lastGrowth=Date.now();return;}
+      if(!polling){
+        polling=true;
+        try{
+          const so=await serverOffset(id);
+          if(so>serverSeen){serverSeen=so;lastGrowth=Date.now();task.serverBytes=so-offset;}
+        }catch(_){}
+        polling=false;
+      }
+      task.quietMs=Date.now()-lastGrowth;
+      if(task.quietMs>UT.stallMs){reason='stalled';xhr.abort();}
+    },UT.pollMs);
+    const cleanup=()=>{clearInterval(poll);activeXhrs.delete(xhr);task.quietMs=0;};
     xhr.open('PUT',API+'/uploads/'+encodeURIComponent(id)+'?offset='+offset);
     xhr.upload.onprogress=e=>{
-      if(e.loaded>0) started=true;
-      last=Date.now();
-      task.inflight=e.loaded;
+      if(e.loaded>clientLoaded){clientLoaded=e.loaded;lastGrowth=Date.now();}
+      task.clientBytes=e.loaded;
       task.state='sending';
     };
-    xhr.upload.onload=()=>{started=true;last=Date.now();};
     xhr.onload=()=>{
       cleanup();
       let d={};
@@ -370,12 +374,14 @@ function putChunk(id,offset,data,task){
     };
     xhr.onerror=()=>{cleanup();rej(new Error('Network error'));};
     xhr.onabort=()=>{cleanup();const err=new Error(reason||'retry');err.stallReason=reason||'manual';rej(err);};
-    xhr.send(data);
+    // Whole file when starting fresh (the browser streams it natively);
+    // the remaining part when resuming.
+    xhr.send(offset===0?file:file.slice(offset));
   });
 }
 async function uploadOne(file,task){
   const id=uploadIdFor(file);
-  task.state='starting';task.slowRetries=0;task.attempt=0;
+  task.state='starting';task.attempt=0;
   let start=null,attempt=0;
   while(!start){
     try{start=await apiJSON('POST',API+'/uploads',{id,name:file.name,size:file.size});}
@@ -386,42 +392,36 @@ async function uploadOne(file,task){
     }
   }
   let offset=Number(start.offset)||0;
-  const chunk=Math.max(1024*1024,Math.min(UPLOAD_CHUNK,Number(start.chunk)||UPLOAD_CHUNK));
-  task.confirmed=offset;
-  attempt=0;
-  while(offset<file.size){
-    const end=Math.min(file.size,offset+chunk);
-    task.inflight=0;
-    const data=await readChunk(file,offset,end);
-    try{
-      task.state='sending';
-      const d=await putChunk(id,offset,data,task);
-      offset=Number(d.offset);
-      task.inflight=0;task.confirmed=offset;
-      attempt=0;task.slowRetries=0;task.attempt=0;
-    }catch(e){
-      task.inflight=0;
-      if(!retryable(e)||++attempt>15) throw e;
-      if(e.stallReason==='no-start') task.slowRetries++;
-      task.state='reconnecting';task.attempt=attempt;
-      if(e.stallReason!=='manual') await waitOrKick(Math.min(8000,300*2**attempt));
-      try{
-        const st=await apiJSON('GET',API+'/uploads/'+encodeURIComponent(id));
-        offset=Number(st.offset)||0;task.confirmed=offset;
-      }catch(_){}
-    }
-  }
-  task.state='finishing';
   attempt=0;
   while(true){
+    while(offset<file.size){
+      task.confirmed=offset;task.clientBytes=0;task.serverBytes=0;
+      task.state='sending';
+      try{
+        const d=await sendFrom(id,file,offset,task);
+        offset=Number(d.offset);
+        attempt=0;task.attempt=0;
+      }catch(e){
+        if(!retryable(e)) throw e;
+        if(!e.status&&e.stallReason!=='manual'&&!(await sliceReadable(file,offset))){
+          const err=new Error('unreadable');err.unreadable=true;throw err;
+        }
+        if(++attempt>12) throw e;
+        task.state='reconnecting';task.attempt=attempt;
+        if(e.stallReason!=='manual') await waitOrKick(Math.min(8000,400*2**attempt));
+        try{offset=await serverOffset(id);}catch(_){}
+      }
+      task.confirmed=offset;task.clientBytes=0;task.serverBytes=0;
+    }
+    task.state='finishing';
     try{return await apiJSON('POST',API+'/uploads/'+encodeURIComponent(id)+'/complete');}
     catch(e){
-      // Computer says part of the file is missing: go back and send the rest.
+      // The computer is missing part of the file: send the rest.
       if(e.status===409&&e.data&&typeof e.data.offset==='number'&&e.data.offset<file.size){
-        return await uploadOne(file,task);
+        offset=e.data.offset;continue;
       }
-      if(!retryable(e)||++attempt>8) throw e;
-      task.state='reconnecting';
+      if(!retryable(e)||++attempt>12) throw e;
+      task.state='reconnecting';task.attempt=attempt;
       await waitOrKick(800*attempt);
     }
   }
@@ -436,7 +436,7 @@ $('#uploadBar').addEventListener('click',()=>{
 });
 function uploadedBytes(){
   let s=uploadState.doneBytes;
-  uploadState.tasks.forEach(t=>{s+=t.confirmed+t.inflight;});
+  uploadState.tasks.forEach(t=>{s+=(t.confirmed||0)+Math.max(t.clientBytes||0,t.serverBytes||0);});
   return s;
 }
 function renderUploadUI(){
@@ -460,12 +460,14 @@ function renderUploadUI(){
     if(t.state==='reconnecting'&&(!reconnecting||t.attempt>reconnecting.attempt)) reconnecting=t;
     if(t.state==='finishing') finishing=true;
   });
-  const idleMs=now-(uploadState.lastMove||now);
+  let quiet=0;
+  uploadState.tasks.forEach(t=>{quiet=Math.max(quiet,t.quietMs||0);});
+  const idleMs=Math.min(now-(uploadState.lastMove||now),quiet||Infinity);
   let t;
   if(reconnecting){
     t='↻ Connection dropped — resuming'+(reconnecting.attempt>1?' (try '+reconnecting.attempt+')':'')+' · tap to retry now';
-  } else if(idleMs>4000&&!finishing){
-    t='Waiting for the connection… tap to retry now';
+  } else if(idleMs>UT.slowMs&&!finishing){
+    t='Connection is slow — still trying ('+Math.round(idleMs/1000)+'s) · tap to retry now';
   } else if(finishing&&uploadState.speed<1024){
     t='Saving on the computer…';
   } else if(uploadState.speed>=1024){
@@ -477,7 +479,7 @@ function renderUploadUI(){
     t='Starting…';
   }
   spd.textContent=t;
-  $('#uploadBar').classList.toggle('stalled',!!reconnecting||idleMs>4000);
+  $('#uploadBar').classList.toggle('stalled',!!reconnecting||idleMs>UT.slowMs);
 }
 function startUploadUI(){
   $('#uploadBar').classList.add('active');
@@ -511,7 +513,7 @@ async function uploadFiles(files,opts){
   const worker=async()=>{
     while(queue.length){
       const file=queue.shift();
-      const task={confirmed:0,inflight:0};
+      const task={confirmed:0,clientBytes:0,serverBytes:0,quietMs:0};
       uploadState.tasks.add(task);
       uploadState.current=file.name;
       try{

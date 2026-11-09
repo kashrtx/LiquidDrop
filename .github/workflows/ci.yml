@@ -35,7 +35,7 @@ jobs:
       - name: Upload engine stall tests (browser code)
         if: runner.os == 'Linux'
         run: |
-          node tests/ui/upload-stall.test.js ui/app.js 4,5
-          node tests/ui/upload-stall.test.js ui/app.js 1,2,3,6
+          node tests/ui/upload-stall.test.js ui/app.js
+          SCENARIO=1 QUIET_DELAY=250 GUARD_MS=90000 node tests/ui/upload-stall.test.js ui/app.js
       - name: Minimal build (no optional features)
         run: cargo build --release --no-default-features --target-dir target/minimal
