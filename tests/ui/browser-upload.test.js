@@ -36,7 +36,7 @@ const hash = b => createHash('sha256').update(b).digest('hex');
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
-    await page.addInitScript(() => { window.LD_UPLOAD_TIMING = {requestMs:700,stallMs:1500,pollMs:100,slowMs:400,bundleMs:700}; });
+    await page.addInitScript(() => { window.LD_UPLOAD_TIMING = {requestMs:700,stallMs:1500,pollMs:100,slowMs:400,bundleMs:700,packageMs:700}; });
     for (const mode of (process.env.LD_BENCHMARK ? ['throughput'] : ['normal-mp4','mixed','lost-start','lost-put-reply','lost-complete','native-stall','storage-full'])) {
       await page.goto(`http://127.0.0.1:${port}/${token}/`);
       let injected = false, puts = 0;
@@ -167,6 +167,40 @@ const hash = b => createHash('sha256').update(b).digest('hex');
       assert.equal(await page.evaluate(()=>getFileKind('Memo.rtfd.zip')),'document');
       console.log('PASS real browser: real RTFD package upload, text preview, attachments preserved');
 
+      // Browser-generated multipart has real bytes even when JS File.size says 0.
+      // Chromium models that metadata mismatch; WebKit also packages directories
+      // during FormData serialization. Do not replace or slice the original File.
+      let packageRequests=0;
+      await page.route('**/package',async route=>{
+        packageRequests++;
+        if(packageRequests===1){await route.fetch();return;}
+        await route.continue();
+      });
+      const nativeNames=await page.evaluate(async token=>{
+        const bytes=await (await fetch('/'+token+'/download/Memo.rtfd.zip')).arrayBuffer();
+        const file=new File([bytes],'Native.rtfd.zip',{type:'application/zip'});
+        Object.defineProperty(file,'size',{value:0});
+        return uploadFiles([file]);
+      },token);
+      assert.deepEqual(nativeNames,['Native.rtfd.zip']);
+      assert.ok(packageRequests>=2,'lost multipart reply must retry safely');
+      assert.equal(hash(await fs.readFile(path.join(dir,'Native.rtfd.zip'))),hash(packageBytes));
+      assert.ok(!(await fs.readdir(dir)).some(n=>n.startsWith('Native (')),'no duplicate package after lost reply');
+      await page.unroute('**/package');
+      console.log('PASS real browser: zero reported size, real multipart bytes, lost reply, original package preserved');
+
+      const packedNames=await page.evaluate(async token=>{
+        const bytes=await (await fetch('/'+token+'/download/Memo.rtfd.zip')).arrayBuffer();
+        const file=new File([bytes],'Nested.rtfd.zip',{type:'application/zip'});
+        Object.defineProperty(file,'size',{value:0});
+        return uploadFiles([file],{bundle:true,name:'Apple-batch.zip'});
+      },token);
+      assert.deepEqual(packedNames,['Apple-batch.zip']);
+      const appleBatch=unzipStored(await fs.readFile(path.join(dir,'Apple-batch.zip')));
+      assert.equal(hash(appleBatch.get('Nested.rtfd.zip')),hash(packageBytes));
+      console.log('PASS real browser: Zip & Send uses actual received package size, with private staging');
+
+
       // A package exported by the picker with no bytes must not become a success.
       await page.locator('#fileInput').setInputFiles([{name:'Broken.rtfd.zip',mimeType:'application/zip',buffer:Buffer.alloc(0)}]);
       await page.waitForFunction(()=>uploadState.batches===0);
@@ -223,6 +257,11 @@ const hash = b => createHash('sha256').update(b).digest('hex');
       console.log('PASS real browser: directory drag and drop reads every browser page and preserves empty folders');
 
     }
+    await page.setViewportSize({width:390,height:844});
+    await page.evaluate(()=>toast('Package upload failed. This is a long message that must remain readable on a phone rather than extending off the screen.','error'));
+    const toastBounds=await page.locator('#toast').boundingBox();
+    assert.ok(toastBounds.x>=8&&toastBounds.x+toastBounds.width<=382,'mobile error must fit on screen: '+JSON.stringify(toastBounds));
+    console.log('PASS real browser: long error messages fit the phone viewport');
     assert.deepEqual(errors, []);
   } finally {
     if (browser) await browser.close();

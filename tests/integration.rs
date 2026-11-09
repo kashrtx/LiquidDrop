@@ -460,3 +460,25 @@ fn zero_byte_apple_packages_are_not_reported_as_successful_notes() {
     upload(&srv,"empty.txt",b"");
     assert_eq!(std::fs::metadata(srv.dir.join("empty.txt")).unwrap().len(),0);
 }
+
+#[test]
+fn native_package_multipart_counts_real_bytes_and_retries_once() {
+    let srv=start("native-package");
+    let endpoint=format!("/{}/uploads/native-package-001/package",srv.token);
+    let body=b"--pkg-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"Note.rtfd\"\r\nContent-Type: application/rtfd\r\n\r\n{\\rtf1 Real note text}\r\n--pkg-boundary--\r\n";
+    let headers=[("Content-Type","multipart/form-data; boundary=pkg-boundary")];
+    let first=request(srv.port,"POST",&endpoint,&headers,body);
+    assert_eq!(first.status,200,"{}",first.text());
+    assert_eq!(first.json()["size"],22);
+    assert_eq!(request(srv.port,"POST",&endpoint,&headers,body).json(),first.json());
+    let listing=get(&srv,&format!("/{}/files",srv.token)).json();
+    assert_eq!(listing.as_array().unwrap().len(),1);
+    assert_eq!(std::fs::read(srv.dir.join("Note.rtfd")).unwrap(),b"{\\rtf1 Real note text}");
+    let preview=get(&srv,&format!("/{}/document-preview/Note.rtfd",srv.token));
+    assert_eq!(preview.json()["text"],"Real note text");
+    // Package input must never be allowed to plant an upload metadata file.
+    let bad=String::from_utf8_lossy(body).replace("Note.rtfd","other-upload.json");
+    let rejected=request(srv.port,"POST",&format!("/{}/uploads/native-package-002/package",srv.token),&headers,bad.as_bytes());
+    assert_eq!(rejected.status,422);
+    assert!(!srv.dir.join(".partial/other-upload.json").exists());
+}

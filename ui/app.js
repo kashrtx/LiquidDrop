@@ -424,10 +424,43 @@ async function sendFrom(id,file,offset,task){
     try{xhr.send(body);}catch(e){fail(e);}
   });
 }
+// Do not slice, wrap, or read this File. WebKit needs its native file path
+// to serialize an RTFD package, whose JavaScript size may still be zero.
+async function sendApplePackage(id,file,task){
+  task.state='sending';task.indeterminate=true;
+  for(let attempt=0;;attempt++){
+    try{
+      const result=await withDeadline(()=>new Promise((resolve,reject)=>{
+        const xhr=new XMLHttpRequest();
+        task.packageXhr=xhr;activeXhrs.add(xhr);
+        const cleanup=()=>{activeXhrs.delete(xhr);if(task.packageXhr===xhr) task.packageXhr=null;};
+        xhr.open('POST',API+'/uploads/'+encodeURIComponent(id)+'/package'+(task.batch?'?batch='+encodeURIComponent(task.batch):''));
+        xhr.upload.onprogress=e=>{if(task.packageXhr===xhr){task.clientBytes=e.loaded;task.state='sending';}};
+        xhr.onload=()=>{
+          cleanup();let data;
+          try{data=JSON.parse(xhr.responseText);}catch(_){reject(new Error('Invalid package response'));return;}
+          if(xhr.status===200&&data.size>0&&data.name){resolve(data);return;}
+          const e=new Error(data.error||('Package upload failed: '+xhr.status));e.status=xhr.status;reject(e);
+        };
+        xhr.onerror=()=>{cleanup();reject(new Error('Package connection interrupted'));};
+        xhr.onabort=()=>{cleanup();reject(new Error('Package upload interrupted'));};
+        const form=new FormData();form.append('file',file);
+        try{xhr.send(form);}catch(e){cleanup();reject(e);}
+      }),UT.packageMs||120000,()=>{if(task.packageXhr){activeXhrs.delete(task.packageXhr);task.packageXhr.abort();task.packageXhr=null;}});
+      task.indeterminate=false;task.actualSize=result.size;
+      uploadState.total+=result.size-file.size;
+      return result;
+    }catch(e){
+      if(!retryable(e)||attempt>=3) throw e;
+      task.state='reconnecting';task.attempt=attempt+1;
+      await waitOrKick(Math.min(8000,800*(attempt+1)));
+    }
+  }
+}
 async function uploadOne(file,task){
   const id=task.id||uploadIdFor(file);
   if(file.size===0&&/\.rtfd(?:\.zip)?$/i.test(file.name)){
-    const e=new Error('No RTFD data was supplied by the browser. In Files, compress the original note package, then select that ZIP, or export as RTF/PDF.');e.status=422;throw e;
+    return sendApplePackage(id,file,task);
   }
   task.state='starting';task.attempt=0;
   let start=null,attempt=0;
@@ -490,7 +523,8 @@ function renderUploadUI(){
   const pct=$('#uploadPct'),fill=$('#progressFill'),name=$('#uploadName'),spd=$('#uploadSpeed');
   const sent=uploadedBytes(),total=Math.max(1,uploadState.total);
   const p=Math.min(uploadState.batches?99:100,Math.floor(sent/total*100));
-  pct.textContent=p+'%';fill.style.width=p+'%';
+  const unknown=Array.from(uploadState.tasks).some(t=>t.indeterminate);
+  pct.textContent=unknown?'Sending…':p+'%';fill.style.width=unknown?'50%':p+'%';
   const n=uploadState.files;
   name.textContent=n>1?('Sending '+Math.min(uploadState.done+uploadState.failed+1,n)+' of '+n+' · '+uploadState.current):uploadState.current;
   const now=performance.now();
@@ -586,7 +620,7 @@ async function uploadFiles(files,opts){
       try{
         const res=await uploadOne(file,task);
         names.push(res.name);
-        if(batch) manifest.push({id:task.id,path:item.path,size:file.size});
+        if(batch) manifest.push({id:task.id,path:item.path,size:res.size===undefined?file.size:res.size});
         uploadState.done++;
       }catch(e){
         failed++;uploadState.failed++;
@@ -597,7 +631,7 @@ async function uploadFiles(files,opts){
             : '✗ '+file.name+': '+(e.message||'failed')),'error');
       }
       uploadState.tasks.delete(task);
-      uploadState.doneBytes+=file.size;
+      uploadState.doneBytes+=task.actualSize===undefined?file.size:task.actualSize;
     }
   };
   const workers=[];

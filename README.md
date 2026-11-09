@@ -72,9 +72,11 @@ Lost archive replies are retried safely without creating duplicate ZIPs.
 Apple RTFD documents can contain rich text and attachments. LiquidDrop recognizes
 `.rtfd` and `.rtfd.zip` and previews their text; formatting and attachments stay in
 the original download. A `.rtfd.zip` can be Apple's packaged representation rather
-than a conversion made by LiquidDrop. If Safari supplies no package bytes, the app
-reports a failed export: compress the original package in Files or export as
-RTF/PDF and send that. A previously received zero-byte copy cannot supply the note's text.
+than a conversion made by LiquidDrop. Safari may report zero file size for a native package before its multipart uploader
+creates the archive. LiquidDrop sends that original File through the native uploader
+and checks the bytes received, rather than treating the reported size as an empty
+note. If the upload actually contains no data, the app reports that failure.
+A previously received zero-byte copy cannot supply the note's text.
 
 ### Connect your phone
 
@@ -170,7 +172,7 @@ and requires a single request on the healthy streaming path. This is a controlle
 latency benchmark, not a prediction of phone/Wi-Fi throughput.
 `LD_BENCHMARK_MIB` overrides the default 128 MiB file size.
 
-To publish downloads, push a tag such as `v5.1.0`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
+To publish downloads, push a tag such as `v5.1.1`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
 
 ## Project structure
 

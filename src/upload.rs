@@ -448,6 +448,17 @@ pub async fn receive_multipart(
     target_dir: &Path,
     max_total: Option<u64>,
 ) -> Result<Vec<Saved>, String> {
+    receive_multipart_impl(app, body, boundary, target_dir, max_total, false).await
+}
+
+async fn receive_multipart_impl(
+    app: &Arc<App>,
+    body: Incoming,
+    boundary: &[u8],
+    target_dir: &Path,
+    max_total: Option<u64>,
+    package_only: bool,
+) -> Result<Vec<Saved>, String> {
     let mut delim = b"--".to_vec();
     delim.extend_from_slice(boundary);
     let mut sep = b"\r\n--".to_vec();
@@ -506,6 +517,14 @@ pub async fn receive_multipart(
         let headers = String::from_utf8_lossy(&r.buf[..header_end]).into_owned();
         r.buf.advance(header_end + 4);
         let filename = header_filename(&headers);
+        if package_only {
+            if let Some(name) = &filename {
+                let lower = name.to_ascii_lowercase();
+                if !saved.is_empty() || !(lower.ends_with(".rtfd") || lower.ends_with(".rtfd.zip")) {
+                    return Err("Expected one Apple RTFD package.".into());
+                }
+            }
+        }
 
         let tmp = app
             .paths
@@ -625,4 +644,49 @@ mod tests {
             Some(&b"----abc"[..])
         );
     }
+}
+
+/// Safari package files may report size=0 until FormData generates their ZIP.
+/// Count actual multipart bytes, and keep a durable receipt for lost replies.
+pub async fn package(app: &Arc<App>, id: &str, req: http::Request<Incoming>) -> Resp {
+    if !valid_upload_id(id) { return json_error(StatusCode::BAD_REQUEST, "Invalid upload id."); }
+    let batch=util::query_param(req.uri().query().unwrap_or(""),"batch").unwrap_or_default();
+    if !batch.is_empty() && !valid_upload_id(&batch) { return json_error(StatusCode::BAD_REQUEST,"Invalid archive batch."); }
+    let boundary=match req.headers().get("content-type").and_then(|v|v.to_str().ok()).and_then(boundary_from) {
+        Some(b)=>b, None=>return json_error(StatusCode::BAD_REQUEST,"Expected a multipart package upload."),
+    };
+    let lock=app.upload_lock(id);
+    let _guard=match tokio::time::timeout(Duration::from_secs(110),lock.lock_owned()).await {
+        Ok(g)=>g,Err(_)=>return json_error(StatusCode::CONFLICT,"Package upload is still running."),
+    };
+    struct PackageGuard<'a> { app: &'a App, id: &'a str, _guard: tokio::sync::OwnedMutexGuard<()> }
+    impl Drop for PackageGuard<'_> { fn drop(&mut self) { self.app.forget_upload_lock(self.id); } }
+    let _cleanup=PackageGuard { app, id, _guard };
+    let receipt=app.paths.partial.join(format!("package-{}.json",id));
+    if let Some(result)=util::read_json_file(&receipt) {
+        return ok_json(&result);
+    }
+    let saved=match receive_multipart_impl(app,req.into_body(),&boundary,&app.paths.partial,None,true).await {
+        Ok(s)=>s,Err(e)=>return json_error(StatusCode::UNPROCESSABLE_ENTITY,&e),
+    };
+    if saved.len()!=1 || saved[0].size==0 {
+        for s in &saved {let _=tokio::fs::remove_file(app.paths.partial.join(&s.name)).await;}
+        return json_error(StatusCode::UNPROCESSABLE_ENTITY,"The package did not contain any received file data.");
+    }
+    let s=&saved[0];
+    let source=app.paths.partial.join(&s.name);
+    let root=if batch.is_empty(){&app.paths.root}else{&app.paths.partial};
+    let target=if batch.is_empty(){s.name.clone()}else{format!("staged-{}-{}",batch,id)};
+    let dest=match files::finalize(app,&source,root,&target).await {
+        Ok(p)=>p,Err(e)=>return json_error(StatusCode::INTERNAL_SERVER_ERROR,&e.to_string()),
+    };
+    let name=if batch.is_empty(){files::file_name_of(&dest)}else{s.name.clone()};
+    let result=json!({"status":"ok","name":name,"size":s.size});
+    if let Err(e)=util::write_json_file(&receipt,&result) {
+        // Preserve the received package privately if the retry receipt cannot be saved.
+        let _=tokio::fs::rename(&dest,&source).await;
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR,&e.to_string());
+    }
+    if batch.is_empty(){app.hub.send(LiveEvent::Files);}
+    ok_json(&result)
 }

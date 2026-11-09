@@ -583,6 +583,7 @@ async fn post_route(app: &Arc<App>, req: Request<Incoming>, host: bool, route_na
             }
             match rest.split_once('/') {
                 Some((id, "complete")) => upload::complete(app, id).await,
+                Some((id, "package")) => upload::package(app, id, req).await,
                 _ => not_found(),
             }
         }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 5.1.1
+
+- Fix sending native Apple RTFD packages from Safari. These can report a zero JavaScript file size before WebKit generates the package archive during multipart upload. Keep the original File intact and let the browser serialize its contents.
+- Count actual received bytes instead of rejecting a package based on its reported size. Still reject genuinely empty received packages.
+- Keep package retries idempotent after a lost reply, including packages uploaded through Zip & Send. Use the received byte count when creating the final archive.
+- Wrap long status messages on mobile so errors remain readable.
+
 ## 5.1.0
 
 - Recognize Apple RTFD documents and `.rtfd.zip` packages. Preview their rich-text content as readable plain text while preserving the original package and attachments.
