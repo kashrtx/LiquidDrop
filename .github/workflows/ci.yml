@@ -32,5 +32,10 @@ jobs:
           retention-days: 14
       - name: Tests
         run: cargo test --release
+      - name: Upload engine stall tests (browser code)
+        if: runner.os == 'Linux'
+        run: |
+          node tests/ui/upload-stall.test.js ui/app.js 4,5
+          node tests/ui/upload-stall.test.js ui/app.js 1,2,3,6
       - name: Minimal build (no optional features)
         run: cargo build --release --no-default-features --target-dir target/minimal

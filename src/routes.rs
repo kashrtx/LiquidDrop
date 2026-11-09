@@ -102,7 +102,15 @@ async fn route(
         Method::POST => post_route(app, req, host, &route_name, &rest).await,
         Method::PUT => {
             if route_name == "uploads" {
-                upload::put_chunk(app, &rest, query, req.into_body()).await
+                let http1 = req.version() != http::Version::HTTP_2;
+                let mut r = upload::put_chunk(app, &rest, query, req.into_body()).await;
+                if http1 {
+                    // Each chunk gets a fresh connection. Phones (iPhone especially)
+                    // sometimes reuse a keep-alive socket that Wi-Fi power saving
+                    // has silently killed; the next chunk then hangs at 0 B/s.
+                    web::set_header(&mut r, "connection", "close");
+                }
+                r
             } else {
                 not_found()
             }

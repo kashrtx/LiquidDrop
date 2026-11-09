@@ -14,7 +14,7 @@ use crate::config::UPLOAD_CHUNK_HINT;
 use crate::events::{Kind, LiveEvent};
 use crate::files;
 use crate::web::{json, json_error, ok_json, Resp};
-use crate::term::{CYAN, RESET};
+use crate::term::{CYAN, RESET, YELLOW};
 use crate::util;
 use bytes::{Buf, BytesMut};
 use http::StatusCode;
@@ -210,6 +210,18 @@ pub async fn put_chunk(app: &Arc<App>, id: &str, query: &str, body: Incoming) ->
     let new_offset = on_disk.min(offset + written);
     if failure.is_none() && new_offset != offset + written {
         failure = Some((StatusCode::INSUFFICIENT_STORAGE, "Could not save the file.".to_string()));
+    }
+    if let Some((status, msg)) = &failure {
+        let name = meta.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+        say!(
+            "  {}⚠  Upload interrupted:{} {} at {} ({} {}) — the device will resume",
+            YELLOW,
+            RESET,
+            name,
+            util::fmt_size(new_offset),
+            status.as_u16(),
+            msg
+        );
     }
     match failure {
         None => ok_json(&json!({"offset": new_offset, "size": size})),

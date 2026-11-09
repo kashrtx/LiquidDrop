@@ -11,3 +11,8 @@
 .file-preview.vid-type{background-size:cover;background-position:center}
 .file-preview.vid-type .vid-icon{font-size:22px;opacity:.8}
 .file-preview.vid-type.has-poster .vid-icon{display:none}
+.upload-bar{cursor:default}
+.upload-bar.stalled{cursor:pointer}
+.upload-bar.stalled .upload-speed{color:#fbbf24}
+.upload-bar.stalled .progress-fill{animation:ldPulse 1.4s ease-in-out infinite}
+@keyframes ldPulse{0%,100%{opacity:1}50%{opacity:.45}}

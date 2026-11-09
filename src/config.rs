@@ -21,7 +21,7 @@ pub const STATUS_CLIENT_TTL_SECS: u64 = 120;
 pub const STATUS_SPEED_WINDOW_SECS: u64 = 5;
 
 /// Suggested chunk size for resumable uploads (the client may use any size).
-pub const UPLOAD_CHUNK_HINT: u64 = 16 * 1024 * 1024;
+pub const UPLOAD_CHUNK_HINT: u64 = 8 * 1024 * 1024;
 /// Unfinished uploads older than this are cleaned up at startup.
 pub const PARTIAL_MAX_AGE_SECS: u64 = 48 * 3600;
 
