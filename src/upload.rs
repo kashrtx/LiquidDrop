@@ -690,3 +690,12 @@ pub async fn package(app: &Arc<App>, id: &str, req: http::Request<Incoming>) -> 
     if batch.is_empty(){app.hub.send(LiveEvent::Files);}
     ok_json(&result)
 }
+
+
+pub fn package_receipt(app: &App, id: &str) -> Resp {
+    if !valid_upload_id(id) { return json_error(StatusCode::BAD_REQUEST,"Invalid upload id."); }
+    match util::read_json_file(&app.paths.partial.join(format!("package-{}.json",id))) {
+        Some(result)=>ok_json(&result),
+        None=>json_error(StatusCode::NOT_FOUND,"No completed transfer has been recorded for this file."),
+    }
+}

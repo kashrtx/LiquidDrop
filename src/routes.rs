@@ -340,7 +340,10 @@ async fn get_route(
                 not_found()
             }
         }
-        "uploads" => upload::status(app, rest).await,
+        "uploads" => match rest.split_once('/') {
+            Some((id,"package"))=>upload::package_receipt(app,id),
+            _=>upload::status(app,rest).await,
+        },
         "zip" => zip_download(app, rest).await,
         "vendor" => {
             if rest.split('/').any(|p| p.is_empty() || p.starts_with('.')) {

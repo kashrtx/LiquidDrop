@@ -170,9 +170,10 @@ const hash = b => createHash('sha256').update(b).digest('hex');
       // Browser-generated multipart has real bytes even when JS File.size says 0.
       // Chromium models that metadata mismatch; WebKit also packages directories
       // during FormData serialization. Do not replace or slice the original File.
-      let packageRequests=0;
+      let packageRequests=0, packagePosts=0;
       await page.route('**/package',async route=>{
         packageRequests++;
+        if(route.request().method()==='POST') packagePosts++;
         if(packageRequests===1){await route.fetch();return;}
         await route.continue();
       });
@@ -183,7 +184,8 @@ const hash = b => createHash('sha256').update(b).digest('hex');
         return uploadFiles([file]);
       },token);
       assert.deepEqual(nativeNames,['Native.rtfd.zip']);
-      assert.ok(packageRequests>=2,'lost multipart reply must retry safely');
+      assert.ok(packageRequests>=2,'lost multipart reply must be reconciled');
+      assert.equal(packagePosts,1,'a saved file must not be reread after a lost reply');
       assert.equal(hash(await fs.readFile(path.join(dir,'Native.rtfd.zip'))),hash(packageBytes));
       assert.ok(!(await fs.readdir(dir)).some(n=>n.startsWith('Native (')),'no duplicate package after lost reply');
       await page.unroute('**/package');
@@ -200,6 +202,29 @@ const hash = b => createHash('sha256').update(b).digest('hex');
       assert.equal(hash(appleBatch.get('Nested.rtfd.zip')),hash(packageBytes));
       console.log('PASS real browser: Zip & Send uses actual received package size, with private staging');
 
+      const selectedPath=path.join(dir,'.input','Selected.rtfd.zip');
+      await fs.writeFile(selectedPath,packageBytes);
+      await page.evaluate(()=>document.querySelector('#fileInput').addEventListener('change',event=>{
+        window.__sourcePicker=event.target;
+        Object.defineProperty(event.target.files[0],'size',{value:0});
+      },{capture:true,once:true}));
+      let selectionRetained=false;
+      await page.route('**/package',async route=>{
+        if(route.request().method()==='POST'){
+          selectionRetained=await page.evaluate(()=>window.__sourcePicker.isConnected&&window.__sourcePicker.files.length===1);
+          assert.ok(selectionRetained,'retain the original picker until serialization and sending finish');
+        }
+        await route.continue();
+      });
+      await page.locator('#fileInput').setInputFiles(selectedPath);
+      await page.waitForFunction(()=>uploadState.batches===0,null,{timeout:30000});
+      await page.waitForFunction(()=>document.querySelector('#fileInput').files.length===0);
+      assert.ok(selectionRetained);
+      assert.equal(hash(await fs.readFile(path.join(dir,'Selected.rtfd.zip'))),hash(packageBytes));
+      await page.unroute('**/package');
+      console.log('PASS real browser: real picker selection survives until the file is saved');
+
+
 
       // A package exported by the picker with no bytes must not become a success.
       await page.locator('#fileInput').setInputFiles([{name:'Broken.rtfd.zip',mimeType:'application/zip',buffer:Buffer.alloc(0)}]);
@@ -214,6 +239,7 @@ const hash = b => createHash('sha256').update(b).digest('hex');
         {name:'other.txt',mimeType:'text/plain',buffer:Buffer.from('third')}];
       const zipsBefore=new Set((await fs.readdir(dir)).filter(n=>n.endsWith('.zip')));
       await page.locator('#fileInput').setInputFiles(duplicated);
+      assert.equal(await page.locator('#fileInput').evaluate(input=>input.files.length),3,'keep selection while ZIP choice is pending');
       await page.locator('#btnZip').click();
       await page.waitForFunction(()=>uploadState.batches===0,null,{timeout:30000});
       const created=(await fs.readdir(dir)).filter(n=>n.endsWith('.zip')&&!zipsBefore.has(n));

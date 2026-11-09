@@ -88,9 +88,12 @@ if(stopServerBtn){
 
 const dz=$('#dropzone'),fi=$('#fileInput');
 dz.addEventListener('click',()=>fi.click());
-fi.addEventListener('change',()=>{
-  if(fi.files.length) handleFiles(Array.from(fi.files));
-  fi.value='';
+fi.addEventListener('change',async()=>{
+  const files=Array.from(fi.files||[]);
+  if(!files.length) return;
+  fi.disabled=true;
+  try{await handleFiles(files);}
+  finally{fi.value='';fi.disabled=false;}
 });
 ['dragenter','dragover'].forEach(e=>dz.addEventListener(e,ev=>{
   ev.preventDefault();dz.classList.add('drag-over');
@@ -101,12 +104,13 @@ fi.addEventListener('change',()=>{
 const folderPaths=new WeakMap();
 const folderInput=$('#folderInput');
 $('#folderPick').addEventListener('click',()=>folderInput.click());
-folderInput.addEventListener('change',()=>{
+folderInput.addEventListener('change',async()=>{
   const files=Array.from(folderInput.files||[]);
   files.forEach(f=>folderPaths.set(f,f.webkitRelativePath||f.name));
-  if(files.length) sendFolder(files,[]);
-  else toast('No files were selected. Empty folders can be sent by drag and drop.','error');
-  folderInput.value='';
+  if(!files.length){toast('No files were selected. Empty folders can be sent by drag and drop.','error');return;}
+  folderInput.disabled=true;
+  try{await sendFolder(files,[]);}
+  finally{folderInput.value='';folderInput.disabled=false;}
 });
 function sendFolder(files,directories){
   const roots=new Set([...files.map(f=>(folderPaths.get(f)||f.name).split('/')[0]),...directories.map(p=>p.split('/')[0])]);
@@ -152,28 +156,30 @@ let pendingFiles=null;
 
 function handleFiles(files){
   if(files.length>=ZIP_THRESHOLD){
-    pendingFiles=files;
-    $('#modalCount').textContent=files.length;
-    $('#zipModal').classList.add('show');
-  } else {
-    uploadFiles(files);
+    if(pendingFiles){toast('Choose how to send the current selection first.','error');return Promise.resolve([]);}
+    return new Promise(resolve=>{
+      pendingFiles={files,resolve};
+      $('#modalCount').textContent=files.length;
+      $('#zipModal').classList.add('show');
+    });
   }
+  return uploadFiles(files);
 }
-
-$('#btnZip').addEventListener('click',async()=>{
+async function sendPendingFiles(bundle){
   $('#zipModal').classList.remove('show');
   if(!pendingFiles) return;
-  const f=pendingFiles; pendingFiles=null;
-  await uploadFiles(f,{bundle:true});
-});
-$('#btnSeparate').addEventListener('click',()=>{
-  $('#zipModal').classList.remove('show');
-  if(!pendingFiles) return;
-  const f=pendingFiles; pendingFiles=null;
-  uploadFiles(f);
-});
+  const selection=pendingFiles;pendingFiles=null;
+  try{selection.resolve(await uploadFiles(selection.files,{bundle}));}
+  catch(e){selection.resolve([]);toast(e.message||'Upload failed','error');}
+}
+$('#btnZip').addEventListener('click',()=>sendPendingFiles(true));
+$('#btnSeparate').addEventListener('click',()=>sendPendingFiles(false));
 $('#zipModal').addEventListener('click',e=>{
-  if(e.target===$('#zipModal')){$('#zipModal').classList.remove('show');pendingFiles=null;}
+  if(e.target===$('#zipModal')){
+    $('#zipModal').classList.remove('show');
+    if(pendingFiles) pendingFiles.resolve([]);
+    pendingFiles=null;
+  }
 });
 
 function fmtSpeed(bps){
@@ -442,7 +448,7 @@ async function sendApplePackage(id,file,task){
           if(xhr.status===200&&data.size>0&&data.name){resolve(data);return;}
           const e=new Error(data.error||('Package upload failed: '+xhr.status));e.status=xhr.status;reject(e);
         };
-        xhr.onerror=()=>{cleanup();reject(new Error('Package connection interrupted'));};
+        xhr.onerror=()=>{cleanup();reject(new Error('Safari could not read or send this file'));};
         xhr.onabort=()=>{cleanup();reject(new Error('Package upload interrupted'));};
         const form=new FormData();form.append('file',file);
         try{xhr.send(form);}catch(e){cleanup();reject(e);}
@@ -451,6 +457,14 @@ async function sendApplePackage(id,file,task){
       uploadState.total+=result.size-file.size;
       return result;
     }catch(e){
+      try{
+        const receipt=await apiJSON('GET',API+'/uploads/'+encodeURIComponent(id)+'/package');
+        if(receipt.size>0&&receipt.name){
+          task.indeterminate=false;task.actualSize=receipt.size;
+          uploadState.total+=receipt.size-file.size;
+          return receipt;
+        }
+      }catch(_){}
       if(!retryable(e)||attempt>=3) throw e;
       task.state='reconnecting';task.attempt=attempt+1;
       await waitOrKick(Math.min(8000,800*(attempt+1)));
