@@ -56,6 +56,7 @@ liquiddrop --port 8888  # custom port
 liquiddrop --new-token  # new URL (invalidates old bookmarks)
 liquiddrop --dir D:\Shared --no-browser --no-tray --verbose
 ```
+**Secure mode (HTTPS):** run in terminal `LiquidDrop.exe --secure` (Windows), `open -a LiquidDrop --args --secure` (Mac) or `./liquiddrop --secure` (Linux), or add ` --secure` to a shortcut's Target, then accept the one-time certificate warning on your phone.
 
 ### Connect your phone
 
