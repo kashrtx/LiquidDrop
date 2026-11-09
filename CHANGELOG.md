@@ -1,5 +1,15 @@
 # Changelog
 
+## 5.1.2
+
+- Keep the original file and folder picker selections alive until uploads finish. Previously, the page cleared them before asynchronous sending began.
+- Preserve selected files while the Zip & Send choice is open, and release them after sending or cancelling.
+- Check the server receipt after a native package upload reports a transport error. If the file was saved, confirm success without reading and uploading it again.
+- Describe file-read and transport failures more accurately instead of labelling every failure as a dropped connection.
+- Add real-picker and receipt-recovery browser regressions. Fast streaming uploads remain unchanged.
+
+**Known limitation:** Some RTFD selections remain unreadable through iOS Safari or the Files provider. This release does not claim to resolve that platform-specific issue. Exporting as RTF/PDF or selecting an explicitly compressed copy can help.
+
 ## 5.1.1
 
 - Fix sending native Apple RTFD packages from Safari. These can report a zero JavaScript file size before WebKit generates the package archive during multipart upload. Keep the original File intact and let the browser serialize its contents.

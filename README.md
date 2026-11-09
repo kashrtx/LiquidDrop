@@ -76,7 +76,11 @@ than a conversion made by LiquidDrop. Safari may report zero file size for a nat
 creates the archive. LiquidDrop sends that original File through the native uploader
 and checks the bytes received, rather than treating the reported size as an empty
 note. If the upload actually contains no data, the app reports that failure.
-A previously received zero-byte copy cannot supply the note's text.
+A previously received zero-byte copy cannot supply the note's text. Some native RTFD selections
+remain unreadable through iOS Safari or their Files provider, even through the
+native upload path. If that happens, export the note as RTF/PDF or compress it in
+Files and select the resulting archive. Text preview support does not resolve
+browser access failures.
 
 ### Connect your phone
 
@@ -172,7 +176,7 @@ and requires a single request on the healthy streaming path. This is a controlle
 latency benchmark, not a prediction of phone/Wi-Fi throughput.
 `LD_BENCHMARK_MIB` overrides the default 128 MiB file size.
 
-To publish downloads, push a tag such as `v5.1.1`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
+To publish downloads, push a tag such as `v5.1.2`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
 
 ## Project structure
 
