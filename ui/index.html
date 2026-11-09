@@ -319,6 +319,15 @@ body{
 .file-list::-webkit-scrollbar,.file-list-wrap::-webkit-scrollbar{width:8px;background:transparent}
 .file-list::-webkit-scrollbar-thumb,.file-list-wrap::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border-radius:999px}
 .toast{width:max-content;max-width:calc(100vw - 32px);white-space:normal;overflow-wrap:anywhere;box-sizing:border-box;text-align:center;transition:opacity .4s ease,transform .4s ease}
+.upload-actions{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;padding:10px}
+.text-dialog{width:calc(100vw - 32px);max-width:600px;max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);margin:auto;padding:24px;border:1px solid var(--glass-border);border-radius:24px;background:#141423;color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.5);overflow:auto}
+.text-dialog::backdrop{background:rgba(0,0,0,.65);backdrop-filter:blur(10px)}
+.text-dialog h3{font-size:21px;margin-bottom:8px}.text-dialog p{font-size:13px;line-height:1.5;color:var(--text2);margin-bottom:14px}
+.text-dialog label{font-size:13px;font-weight:700}.text-dialog input,.text-dialog textarea{display:block;width:100%;box-sizing:border-box;border:1px solid var(--glass-border);border-radius:12px;background:rgba(255,255,255,.05);color:var(--text);font:inherit;font-size:16px;padding:12px;margin:8px 0 14px}
+.text-dialog textarea{min-height:150px;height:30vh;max-height:45vh;resize:vertical;line-height:1.5}.text-dialog input:focus,.text-dialog textarea:focus{outline:2px solid var(--accent2);outline-offset:1px}
+.text-editor-label,.text-dialog-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}.text-editor-label>div{display:flex;gap:6px}.text-editor-label .ext-btn{padding:7px 9px;font-size:11px}
+.text-byte-count{font-size:11px;color:var(--text2);margin-bottom:8px}.text-dialog .text-dialog-status{min-height:20px;margin-bottom:14px}.text-dialog-status.error{color:var(--accent3)}.text-dialog button:disabled{opacity:.45;cursor:default}.text-dialog-actions{justify-content:flex-end}
+.file-copy{display:block;margin-top:5px;padding:6px 10px;min-height:30px;max-width:100%;border:1px solid var(--glass-border);border-radius:9px;background:rgba(110,231,183,.08);color:var(--accent);font:inherit;font-size:11px;font-weight:700;cursor:pointer}.file-copy:disabled{opacity:.5;cursor:default}
 </style>
 <style>
 {{APP_CSS}}
@@ -373,7 +382,11 @@ body{
   <input type="file" id="fileInput" multiple>
 </div>
 
-<div style="text-align:center;padding:10px"><button type="button" id="folderPick" class="ext-btn">📁 Send Folder</button><input type="file" id="folderInput" webkitdirectory multiple hidden></div>
+<div class="upload-actions">
+  <button type="button" id="folderPick" class="ext-btn">📁 Send Folder</button>
+  <button type="button" id="pasteText" class="ext-btn">📋 Paste Text</button>
+  <input type="file" id="folderInput" webkitdirectory multiple hidden>
+</div>
 
 <div class="upload-bar glass app-upload" id="uploadBar">
   <div class="upload-info">
@@ -435,6 +448,20 @@ body{
 </div>
 </div>
 <div class="toast" id="toast"></div>
+
+<dialog id="textDialog" class="text-dialog" aria-labelledby="textDialogTitle" aria-describedby="textDialogHelp">
+  <form id="textForm" method="dialog">
+    <h3 id="textDialogTitle">Send Text</h3>
+    <p id="textDialogHelp">Paste or type text below. Nothing is shared until you press Send .txt.</p>
+    <label for="textFilename">Filename</label>
+    <input id="textFilename" type="text" maxlength="100" placeholder="Clipboard.txt" autocomplete="off" spellcheck="false">
+    <div class="text-editor-label"><label for="textContent">Text</label><div><button type="button" class="ext-btn" id="textReadClipboard">Read Clipboard</button><button type="button" class="ext-btn" id="textClear">Clear</button></div></div>
+    <textarea id="textContent" placeholder="Paste here, or tap and hold to paste on your phone." spellcheck="false"></textarea>
+    <div id="textByteCount" class="text-byte-count"></div>
+    <p id="textDialogStatus" class="text-dialog-status" role="status" aria-live="polite"></p>
+    <div class="text-dialog-actions"><button id="textCancel" class="ext-btn" type="button">Cancel</button><button id="textSubmit" class="ext-btn primary" type="submit" disabled>Send .txt</button></div>
+  </form>
+</dialog>
 
 <div class="modal-overlay" id="zipModal">
   <div class="modal">

@@ -11,15 +11,21 @@ const AUDIO_EXTS=['mp3','wav','m4a','aac','flac','ogg','oga','opus','weba','aiff
 const CODE_EXTS=['py','pyw','js','mjs','cjs','ts','tsx','jsx','java','c','cc','cpp','cxx','h','hpp','cs','go','rs','php','rb','swift','kt','kts','dart','lua','pl','r','sh','bash','zsh','bat','cmd','ps1','sql','html','htm','css','scss','sass','less','json','xml','yaml','yml','toml','ini','cfg','conf','vue','svelte','ipynb'];
 const DOC_EXTS=['pdf','doc','docx','txt','rtf','rtfd','odt','pages','xls','xlsx','csv','tsv','ppt','pptx','key','numbers','md'];
 
-function copyText(text){
-  if(navigator.clipboard&&window.isSecureContext) return navigator.clipboard.writeText(text);
-  return new Promise((res,rej)=>{
-    const ta=document.createElement('textarea');
+function copyTextFallback(text){
+  return new Promise((resolve,reject)=>{
+    const previous=document.activeElement,ta=document.createElement('textarea');
     ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.opacity='0';
-    document.body.appendChild(ta);ta.select();
-    try{document.execCommand('copy')?res():rej(new Error('copy'));}catch(e){rej(e);}
-    ta.remove();
+    (document.querySelector('dialog[open]')||document.body).appendChild(ta);ta.focus();ta.select();
+    try{document.execCommand('copy')?resolve():reject(new Error('Copy unavailable'));}
+    catch(e){reject(e);}
+    finally{ta.remove();if(previous&&previous.isConnected) previous.focus({preventScroll:true});}
   });
+}
+function copyText(text){
+  if(navigator.clipboard&&typeof navigator.clipboard.writeText==='function'&&window.isSecureContext){
+    return navigator.clipboard.writeText(text).catch(()=>copyTextFallback(text));
+  }
+  return copyTextFallback(text);
 }
 $('#urlCopy').addEventListener('click',()=>{
   copyText($('#urlCopy').textContent)
@@ -51,8 +57,8 @@ function waitForServerThenReload(){
 const PAGE_BUILD=(document.querySelector('meta[name="liquiddrop-build"]')||{}).content||'';
 let reloadPending=false;
 function reloadForUpdate(){
-  if(uploadState.batches>0){
-    if(!reloadPending) toast('LiquidDrop was updated — refreshing after this upload','success');
+  if(uploadState.batches>0||hasTextDraft()){
+    if(!reloadPending) toast('LiquidDrop was updated. Refresh after sending your files or text','success');
     reloadPending=true;
     return;
   }
@@ -150,6 +156,131 @@ dz.addEventListener('drop',async ev=>{
     }catch(e){toast(e.message||'Folder could not be read. Try Send Folder.','error');}
   }else if(files.length) handleFiles(files);
 });
+
+/* Clipboard sharing stays explicit: review text, then send a UTF-8 file. */
+const TEXT_LIMIT=2*1024*1024;
+const textDialog=$('#textDialog'),textEditor=$('#textContent'),textFilename=$('#textFilename');
+const textDraft={text:'',name:''};
+let textMode='send',textSending=false,textEpoch=0,textRevision=0,textReading=false,textCopyReady=false;
+function hasTextDraft(){return textDraft.text.length>0;}
+function textStatus(message,error=false){
+  $('#textDialogStatus').textContent=message;
+  $('#textDialogStatus').classList.toggle('error',error);
+}
+function defaultTextFilename(){
+  const d=new Date(),pad=n=>String(n).padStart(2,'0');
+  return 'Clipboard-'+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'-'+pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds())+'.txt';
+}
+function textValidation(){
+  if(!textEditor.value.length) return 'Paste or type some text first.';
+  if(new TextEncoder().encode(textEditor.value).length>TEXT_LIMIT) return 'Text is too large. Send it as a file instead (2 MB limit).';
+  const name=textFilename.value.trim();
+  if(!name||/[\\/<>:"|?*\x00-\x1f]/.test(name)||name.startsWith('.')) return 'Choose a filename without slashes or special characters.';
+  if(new TextEncoder().encode(name).length>180) return 'Choose a shorter filename.';
+  return '';
+}
+function updateTextControls(){
+  const bytes=new TextEncoder().encode(textEditor.value).length;
+  $('#textByteCount').textContent=fmtSize(bytes)+(textMode==='send'?' · UTF-8 text':'');
+  $('#textSubmit').disabled=textSending||(textMode==='send'?!!textValidation():!textCopyReady);
+  $('#textSubmit').textContent=textSending?'Sending…':textMode==='copy'?'Copy Text':'Send .txt';
+  $('#textCancel').disabled=textSending;$('#textCancel').textContent=textMode==='copy'?'Close':'Cancel';
+  $('#textReadClipboard').hidden=textMode==='copy';$('#textClear').hidden=textMode==='copy';
+  $('#textReadClipboard').disabled=textSending||textReading||!window.isSecureContext||!navigator.clipboard||!navigator.clipboard.readText;
+  $('#textClear').disabled=textSending;
+  textEditor.readOnly=textSending||textMode==='copy';textFilename.readOnly=textSending||textMode==='copy';
+  textDialog.setAttribute('aria-busy',String(textSending||textReading));
+}
+function saveTextDraft(){if(textMode==='send'){textDraft.text=textEditor.value;textDraft.name=textFilename.value;}}
+function closeTextDialog(){
+  if(textSending) return;
+  saveTextDraft();textEpoch++;
+  textDialog.close();
+}
+function openTextDialog(mode='send'){
+  saveTextDraft();textMode=mode;textEpoch++;textRevision++;textCopyReady=false;
+  $('#textDialogTitle').textContent=mode==='copy'?'Copy Text':'Send Text';
+  $('#textDialogHelp').textContent=mode==='copy'?'Copy this text to this device, or select it in the box below.':'Paste or type text below. Nothing is shared until you press Send .txt.';
+  textEditor.value=mode==='send'?textDraft.text:'';
+  textFilename.value=mode==='send'?(textDraft.name||defaultTextFilename()):'';
+  textStatus(mode==='copy'?'Loading text…':'Tap and hold in the box to paste, or use Ctrl+V.');
+  if(!textDialog.open) textDialog.showModal();
+  updateTextControls();textEditor.focus();
+  return textEpoch;
+}
+async function readTextClipboard(){
+  if(textSending||textReading) return;
+  if(!window.isSecureContext||!navigator.clipboard||!navigator.clipboard.readText){
+    textStatus('Paste into the text box using your device’s Paste command.');textEditor.focus();return;
+  }
+  const epoch=textEpoch,revision=textRevision;
+  textReading=true;updateTextControls();textStatus('Reading clipboard…');
+  try{
+    // Invoke inside the button gesture; do not defer permission-sensitive reads.
+    const pending=navigator.clipboard.readText();
+    const text=await withDeadline(()=>pending,10000);
+    if(epoch!==textEpoch||!textDialog.open) return;
+    if(revision!==textRevision){textStatus('Your edits were kept. Paste again if you want to replace them.');return;}
+    textEditor.value=text;textRevision++;saveTextDraft();
+    textStatus(text.length?(textValidation()||'Review the text, then press Send .txt.'):'The clipboard has no text. You can paste or type here.',!!textValidation()&&text.length>0);
+  }catch(_){if(epoch===textEpoch&&textDialog.open) textStatus('Clipboard access was unavailable. Paste into the box using your device’s Paste command.');}
+  finally{textReading=false;if(textDialog.open) updateTextControls();}
+}
+$('#pasteText').addEventListener('click',()=>{
+  openTextDialog();if(!textDraft.text.length) readTextClipboard();
+});
+$('#textReadClipboard').addEventListener('click',readTextClipboard);
+$('#textClear').addEventListener('click',()=>{
+  textEditor.value='';textRevision++;saveTextDraft();textStatus('Paste or type text here.');updateTextControls();textEditor.focus();
+});
+textEditor.addEventListener('input',()=>{textRevision++;saveTextDraft();textStatus(textValidation(),!!textValidation());updateTextControls();});
+textFilename.addEventListener('input',()=>{saveTextDraft();textStatus(textValidation(),!!textValidation());updateTextControls();});
+$('#textCancel').addEventListener('click',closeTextDialog);
+textDialog.addEventListener('cancel',event=>{event.preventDefault();closeTextDialog();});
+textDialog.addEventListener('click',event=>{
+  const r=textDialog.getBoundingClientRect();
+  if(event.target===textDialog&&(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)) closeTextDialog();
+});
+$('#textForm').addEventListener('submit',async event=>{
+  event.preventDefault();if(textSending) return;
+  if(textMode==='copy'){
+    if(!textCopyReady) return;
+    try{await copyText(textEditor.value);textStatus('Copied to this device.');toast('📋 Text copied','success');}
+    catch(_){textEditor.focus();textEditor.select();textStatus('Text selected. Use your device’s Copy command.');}
+    return;
+  }
+  const error=textValidation();if(error){textStatus(error,true);updateTextControls();return;}
+  saveTextDraft();textSending=true;updateTextControls();textStatus('Sending text…');
+  let name=textFilename.value.trim();if(!/\.txt$/i.test(name)) name+='.txt';
+  try{
+    const names=await uploadFiles([new File([textEditor.value],name,{type:'text/plain;charset=utf-8'})]);
+    if(names.length===1){
+      textDraft.text='';textDraft.name='';textEditor.value='';textFilename.value='';
+      textSending=false;closeTextDialog();toast('✓ '+names[0]+' sent','success');
+      if(reloadPending&&!uploadState.batches) reloadForUpdate();
+    }else{textStatus('Text was not sent. Your draft is still here; try again.',true);}
+  }catch(e){textStatus('Text was not sent. Your draft is still here; try again.',true);}
+  finally{textSending=false;updateTextControls();}
+});
+textEditor.addEventListener('keydown',event=>{
+  if((event.ctrlKey||event.metaKey)&&event.key==='Enter'){event.preventDefault();if(!$('#textSubmit').disabled) $('#textForm').requestSubmit();}
+});
+document.addEventListener('paste',event=>{
+  if(event.defaultPrevented||(event.target&&event.target.closest&&event.target.closest('input,textarea,[contenteditable]'))||textSending) return;
+  if(!event.clipboardData||event.clipboardData.files.length) return;
+  const text=event.clipboardData.getData('text/plain');if(!text) return;
+  event.preventDefault();openTextDialog();
+  textEditor.value+=(textEditor.value?'\n':'')+text;textRevision++;saveTextDraft();updateTextControls();textStatus(textValidation()||'Review the text, then press Send .txt.',!!textValidation());
+});
+async function openReceivedText(name){
+  const epoch=openTextDialog('copy');textFilename.value=name;
+  try{
+    const payload=await apiJSON('GET',API+'/document-preview/'+encodeURIComponent(name));
+    if(epoch!==textEpoch||!textDialog.open) return;
+    if(payload.truncated){textStatus('This file is too large to copy here. Download it to get the full text.',true);return;}
+    textEditor.value=payload.text||'';textCopyReady=true;textStatus('Press Copy Text to copy to this device.');updateTextControls();
+  }catch(_){if(epoch===textEpoch&&textDialog.open) textStatus('Text could not be loaded. Try again or download the file.',true);}
+}
 
 const ZIP_THRESHOLD=3;
 let pendingFiles=null;
@@ -678,12 +809,12 @@ async function uploadFiles(files,opts){
   }
   uploadState.batches--;
   finishUploadUI();
-  if(reloadPending&&uploadState.batches===0) setTimeout(()=>location.reload(),1200);
+  if(reloadPending&&uploadState.batches===0&&!hasTextDraft()) setTimeout(()=>location.reload(),1200);
   loadFiles();
   return names;
 }
 window.addEventListener('beforeunload',e=>{
-  if(uploadState.batches>0){e.preventDefault();e.returnValue='';}
+  if(uploadState.batches>0||hasTextDraft()){e.preventDefault();e.returnValue='';}
 });
 
 /* ===== File list with selection state preserved across refreshes ===== */
@@ -694,7 +825,7 @@ function fileCardMarkup(f,delay){
   return '<div class="file-card glass" style="animation-delay:'+delay+'s">'+
     '<input type="checkbox" class="file-checkbox file-select" data-name="'+dn+'">'+
     filePreviewMarkup(f)+
-    '<div class="file-meta"><div class="file-name">'+esc(f.name)+'</div><div class="file-detail"></div></div>'+
+    '<div class="file-meta"><div class="file-name">'+esc(f.name)+'</div><div class="file-detail"></div>'+(/\.txt$/i.test(f.name)?'<button type="button" class="file-copy" data-name="'+dn+'" title="Copy text to this device">Copy text</button>':'')+'</div>'+
     '<button class="file-delete" data-name="'+dn+'" title="Delete">✕</button>'+
     '<a href="'+API+'/download/'+encodeURIComponent(f.name)+'" download class="file-dl" title="Download">↓</a></div>';
 }
@@ -778,6 +909,8 @@ $('#fileList').addEventListener('error',e=>{
 
 /* ===== Event delegation for the file list ===== */
 $('#fileList').addEventListener('click',e=>{
+  const copy=e.target.closest('.file-copy');
+  if(copy){e.preventDefault();e.stopPropagation();openReceivedText(copy.dataset.name);return;}
   /* Delete button */
   const del=e.target.closest('.file-delete');
   if(del){

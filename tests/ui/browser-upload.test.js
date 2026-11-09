@@ -283,6 +283,113 @@ const hash = b => createHash('sha256').update(b).digest('hex');
       console.log('PASS real browser: directory drag and drop reads every browser page and preserves empty folders');
 
     }
+
+    if(!process.env.LD_BENCHMARK){
+      const clip=await browser.newPage();
+      clip.on('pageerror',e=>errors.push(e.message));
+      await clip.context().grantPermissions(['clipboard-read','clipboard-write']);
+      await clip.goto(`http://127.0.0.1:${port}/${token}/`);
+      const text='Hello from my phone 👋\n中文 café\n\t<script>literal text</script>\n';
+      await clip.evaluate(t=>navigator.clipboard.writeText(t),text);
+      await clip.locator('#pasteText').click();
+      await clip.waitForFunction(t=>document.querySelector('#textContent').value===t,text);
+      assert.ok(!(await fs.readdir(dir)).some(n=>n.startsWith('Clipboard-')),'opening clipboard editor must not share text');
+      await clip.locator('#textFilename').fill('Pasted note');
+      await clip.locator('#textSubmit').click();
+      await clip.waitForFunction(()=>!document.querySelector('#textDialog').open);
+      assert.equal(await fs.readFile(path.join(dir,'Pasted note.txt'),'utf8'),text);
+      const card=clip.locator('.file-card').filter({hasText:'Pasted note.txt'});
+      await card.locator('.file-copy').click();
+      await clip.waitForFunction(()=>!document.querySelector('#textSubmit').disabled);
+      await clip.evaluate(()=>navigator.clipboard.writeText('replace me'));
+      await clip.locator('#textSubmit').click();
+      assert.equal(await clip.evaluate(()=>navigator.clipboard.readText()),text);
+      await clip.locator('#textCancel').click();
+      console.log('PASS real browser: explicit clipboard read, UTF-8 .txt transfer, received-text copy');
+
+      // LAN HTTP does not generally grant clipboard reads. Manual paste must
+      // remain usable without a permission prompt or an automatic read.
+      await clip.evaluate(()=>Object.defineProperty(window,'isSecureContext',{configurable:true,value:false}));
+      await clip.locator('#pasteText').click();
+      assert.equal(await clip.locator('#textReadClipboard').isDisabled(),true);
+      assert.equal(await clip.locator('#textSubmit').isDisabled(),true);
+      await clip.locator('#textFilename').fill('../escape.txt');
+      await clip.locator('#textContent').fill('  manual paste\nsecond line 🐈\t');
+      assert.equal(await clip.locator('#textSubmit').isDisabled(),true);
+      await clip.locator('#textFilename').fill('Manual.txt');
+      await clip.locator('#textCancel').click();
+      await clip.locator('#pasteText').click();
+      assert.equal(await clip.locator('#textContent').inputValue(),'  manual paste\nsecond line 🐈\t');
+      assert.equal(await clip.locator('#textFilename').inputValue(),'Manual.txt');
+      await clip.route('**/uploads',route=>route.fulfill({status:400,contentType:'application/json',body:'{"error":"test failure"}'}));
+      await clip.locator('#textSubmit').click();
+      await clip.waitForFunction(()=>document.querySelector('#textDialogStatus').textContent.includes('not sent'));
+      assert.equal(await clip.locator('#textContent').inputValue(),'  manual paste\nsecond line 🐈\t');
+      await assert.rejects(fs.stat(path.join(dir,'Manual.txt')),{code:'ENOENT'});
+      await clip.unroute('**/uploads');
+      await clip.locator('#textSubmit').click();
+      await clip.waitForFunction(()=>!document.querySelector('#textDialog').open);
+      assert.equal(await fs.readFile(path.join(dir,'Manual.txt'),'utf8'),'  manual paste\nsecond line 🐈\t');
+      await clip.locator('.file-card').filter({hasText:'Manual.txt'}).locator('.file-copy').click();
+      await clip.waitForFunction(()=>!document.querySelector('#textSubmit').disabled);
+      await clip.locator('#textSubmit').click();
+      assert.equal(await clip.evaluate(()=>navigator.clipboard.readText()),'  manual paste\nsecond line 🐈\t');
+      await clip.locator('#textCancel').click();
+      console.log('PASS real browser: HTTP manual paste, cancel retains draft, failed send retry, HTTP copy fallback');
+
+      await clip.locator('#pasteText').click();
+      await clip.locator('#textContent').fill('x'.repeat(2*1024*1024+1));
+      assert.equal(await clip.locator('#textSubmit').isDisabled(),true);
+      assert.ok((await clip.locator('#textDialogStatus').textContent()).includes('too large'));
+      await clip.locator('#textClear').click();
+      await clip.locator('#textCancel').click();
+      await clip.evaluate(()=>{
+        const data=new DataTransfer();data.setData('text/plain','Pasted outside the editor');
+        document.body.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
+      });
+      assert.equal(await clip.locator('#textContent').inputValue(),'Pasted outside the editor');
+      await clip.locator('#textFilename').fill('Pasted note.txt');
+      await clip.locator('#textSubmit').click();
+      await clip.waitForFunction(()=>!document.querySelector('#textDialog').open);
+      assert.equal(await fs.readFile(path.join(dir,'Pasted note (1).txt'),'utf8'),'Pasted outside the editor');
+      console.log('PASS real browser: oversized draft blocked, page paste opens review, duplicate filenames preserved');
+
+      // Permission rejection must preserve the manual editor.
+      await clip.reload();
+      await clip.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{readText:()=>Promise.reject(new DOMException('denied','NotAllowedError'))}}));
+      await clip.locator('#pasteText').click();
+      await clip.waitForFunction(()=>document.querySelector('#textDialogStatus').textContent.includes('unavailable'));
+      assert.equal(await clip.locator('#textContent').isEditable(),true);
+      await clip.locator('#textContent').fill('draft to keep');
+      await clip.locator('#textCancel').click();
+      await clip.locator('#pasteText').click();
+      assert.equal(await clip.locator('#textContent').inputValue(),'draft to keep');
+      await clip.locator('#textClear').click();
+      await clip.locator('#textCancel').click();
+      console.log('PASS real browser: denied clipboard permission leaves an editable, preserved draft');
+      await clip.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{readText:()=>new Promise(resolve=>window.__clipboardResolve=resolve)}}));
+      await clip.locator('#pasteText').click();
+      await clip.locator('#textContent').fill('keep my edits');
+      await clip.evaluate(()=>window.__clipboardResolve('older clipboard text'));
+      await clip.waitForFunction(()=>document.querySelector('#textDialogStatus').textContent.includes('edits were kept'));
+      assert.equal(await clip.locator('#textContent').inputValue(),'keep my edits');
+      await clip.locator('#textClear').click();
+      await clip.locator('#textCancel').click();
+      // Restore a fast permission failure for the mobile layout check.
+      await clip.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{readText:()=>Promise.reject(new DOMException('denied','NotAllowedError'))}}));
+      console.log('PASS real browser: a delayed clipboard response never overwrites user edits');
+
+      await clip.setViewportSize({width:390,height:844});
+      await clip.locator('#pasteText').click();
+      const dialogBounds=await clip.locator('#textDialog').boundingBox();
+      assert.ok(dialogBounds.x>=8&&dialogBounds.x+dialogBounds.width<=382,'text editor fits mobile viewport');
+      await clip.locator('#textContent').fill('A quick note from my phone 👋\n\nPaste text here, then send it as a .txt file.');
+      await clip.locator('#textFilename').fill('Quick note.txt');
+      if(process.env.LD_SCREENSHOT_DIR) await clip.locator('#textDialog').screenshot({path:path.join(process.env.LD_SCREENSHOT_DIR,'clipboard-mobile.png')});
+      await clip.locator('#textClear').click();
+      await clip.locator('#textCancel').click();
+      await clip.close();
+    }
     await page.setViewportSize({width:390,height:844});
     await page.evaluate(()=>toast('Package upload failed. This is a long message that must remain readable on a phone rather than extending off the screen.','error'));
     const toastBounds=await page.locator('#toast').boundingBox();

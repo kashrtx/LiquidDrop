@@ -58,6 +58,18 @@ liquiddrop --dir D:\Shared --no-browser --no-tray --verbose
 ```
 **Secure mode (HTTPS):** run in terminal `LiquidDrop.exe --secure` (Windows), `open -a LiquidDrop --args --secure` (Mac) or `./liquiddrop --secure` (Linux), or add ` --secure` to a shortcut's Target, then accept the one-time certificate warning on your phone.
 
+### Clipboard text
+
+Click **Paste Text** next to Send Folder. Review or type text, choose a filename,
+and press **Send .txt**. The receiving device gets a UTF-8 text file with a
+**Copy text** action for copying its contents locally.
+
+If automatic clipboard access is unavailable, paste directly into the editor
+using your device's Paste command. You can also paste text onto the page outside
+an input to open a draft. Nothing is sent until you confirm. Unsent drafts stay
+on the current page, including after cancelling or a failed send. The text limit
+is 2 MiB. Clipboard contents are not monitored or synchronized in the background.
+
 ### Folders, Zip & Send, and Apple notes
 
 Use **Send Folder**, or drag a folder onto the upload area. LiquidDrop streams
@@ -176,7 +188,7 @@ and requires a single request on the healthy streaming path. This is a controlle
 latency benchmark, not a prediction of phone/Wi-Fi throughput.
 `LD_BENCHMARK_MIB` overrides the default 128 MiB file size.
 
-To publish downloads, push a tag such as `v5.1.2`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
+To publish downloads, push a tag such as `v5.2.0`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
 
 ## Project structure
 

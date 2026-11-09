@@ -1,5 +1,14 @@
 # Changelog
 
+## 5.2.0
+
+- Add **Paste Text** beside Send Folder. Review or edit clipboard text, choose a filename, then send it as a UTF-8 `.txt` file through the existing upload engine.
+- Add **Copy text** to received `.txt` files, with a text viewer and manual selection fallback.
+- Support manual paste on local HTTP pages and when clipboard permission is denied. Pasting text outside an editor opens a draft without sending automatically.
+- Keep cancelled or failed text drafts on the current page. Prevent automatic update reloads from discarding unsent text.
+- Validate filenames and limit text sharing to 2 MiB. Text is shared only after pressing Send .txt; no background clipboard synchronization is performed.
+- Add browser checks for clipboard reads and writes, HTTP fallback, Unicode, duplicate filenames, failed sends, draft preservation, and mobile layout.
+
 ## 5.1.2
 
 - Keep the original file and folder picker selections alive until uploads finish. Previously, the page cleared them before asynchronous sending began.
