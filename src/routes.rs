@@ -451,9 +451,10 @@ async fn zip_download(app: &Arc<App>, rest: &str) -> Resp {
 
 /// Server-side "Zip & Send": bundle uploaded files into one archive.
 async fn bundle(app: &Arc<App>, body: Value) -> Resp {
+    if body.get("batch").is_some() { return crate::bundle::create(app, body).await; }
     let names = names_from(&body);
     let entries = zip_entries(app, &names).await;
-    if entries.is_empty() {
+    if entries.is_empty() || entries.len() != names.len() {
         return json_error(StatusCode::NOT_FOUND, "None of those files exist.");
     }
     let tmp = app.paths.partial.join(format!("bundle-{}.part", util::random_hex(8)));

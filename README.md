@@ -58,6 +58,24 @@ liquiddrop --dir D:\Shared --no-browser --no-tray --verbose
 ```
 **Secure mode (HTTPS):** run in terminal `LiquidDrop.exe --secure` (Windows), `open -a LiquidDrop --args --secure` (Mac) or `./liquiddrop --secure` (Linux), or add ` --secure` to a shortcut's Target, then accept the one-time certificate warning on your phone.
 
+### Folders, Zip & Send, and Apple notes
+
+Use **Send Folder**, or drag a folder onto the upload area. LiquidDrop streams
+its files to the computer and saves one ZIP with the folder structure intact.
+No phone-side ZIP buffering is needed, and loose files do not clutter the shared
+list. Batches support up to 5000 entries. Empty folders are preserved when dropped;
+the folder picker only supplies files and may be unavailable in some mobile browsers.
+
+**Zip & Send** publishes an archive only when every selected file arrives.
+Lost archive replies are retried safely without creating duplicate ZIPs.
+
+Apple RTFD documents can contain rich text and attachments. LiquidDrop recognizes
+`.rtfd` and `.rtfd.zip` and previews their text; formatting and attachments stay in
+the original download. A `.rtfd.zip` can be Apple's packaged representation rather
+than a conversion made by LiquidDrop. If Safari supplies no package bytes, the app
+reports a failed export: compress the original package in Files or export as
+RTF/PDF and send that. A previously received zero-byte copy cannot supply the note's text.
+
 ### Connect your phone
 
 **QR code:** point the camera at it, tap the link.
@@ -152,7 +170,7 @@ and requires a single request on the healthy streaming path. This is a controlle
 latency benchmark, not a prediction of phone/Wi-Fi throughput.
 `LD_BENCHMARK_MIB` overrides the default 128 MiB file size.
 
-To publish downloads, push a tag such as `v5.0.3`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
+To publish downloads, push a tag such as `v5.1.0`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
 
 ## Project structure
 

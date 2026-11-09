@@ -419,3 +419,44 @@ fn concurrent_completion_retries_are_idempotent() {
     assert_eq!(listing.as_array().unwrap().len(), 1);
     assert_eq!(std::fs::read(srv.dir.join("video.mp4")).unwrap(), data);
 }
+
+#[test]
+fn staged_folder_bundle_is_complete_private_and_retry_safe() {
+    let srv = start("folder-zip");
+    let batch="folder-batch-001";
+    let id="folder-file-0001";
+    let uploads=format!("/{}/uploads",srv.token);
+    assert_eq!(post_json(&srv,&uploads,serde_json::json!({"id":id,"batch":batch,"name":"notes.rtf","size":5})).status,200);
+    assert_eq!(request(srv.port,"PUT",&format!("{}/{}?offset=0",uploads,id),&[],b"hello").status,200);
+    assert_eq!(post_json(&srv,&format!("{}/{}/complete",uploads,id),serde_json::json!({})).status,200);
+    assert_eq!(get(&srv,&format!("/{}/files",srv.token)).json().as_array().unwrap().len(),0,"staged files must stay private");
+    let url=format!("/{}/bundle",srv.token);
+    let invalid=post_json(&srv,&url,serde_json::json!({"batch":batch,"entries":[{"id":id,"path":"../escape","size":5}]}));
+    assert_eq!(invalid.status,400);
+    let incomplete=post_json(&srv,&url,serde_json::json!({"batch":batch,"entries":[{"id":"missing-0001","path":"Folder/missing.txt","size":5}]}));
+    assert_eq!(incomplete.status,409);
+    assert_eq!(get(&srv,&format!("/{}/files",srv.token)).json().as_array().unwrap().len(),0);
+    let manifest=serde_json::json!({"batch":batch,"name":"Folder.zip","entries":[{"path":"Folder/empty/"},{"id":id,"path":"Folder/sub/notes.rtf","size":5}]});
+    let first=post_json(&srv,&url,manifest.clone());
+    assert_eq!(first.status,200,"{}",first.text());
+    assert_eq!(post_json(&srv,&url,manifest).json(),first.json(),"lost response must not create another ZIP");
+    let listing=get(&srv,&format!("/{}/files",srv.token)).json();
+    assert_eq!(listing.as_array().unwrap().len(),1);
+    assert_eq!(listing[0]["name"],"Folder.zip");
+    let zip=std::fs::read(srv.dir.join("Folder.zip")).unwrap();
+    assert!(zip.windows(b"Folder/sub/notes.rtf".len()).any(|w|w==b"Folder/sub/notes.rtf"));
+    assert!(zip.windows(b"Folder/empty/".len()).any(|w|w==b"Folder/empty/"));
+    assert!(zip.windows(5).any(|w|w==b"hello"));
+}
+
+#[test]
+fn zero_byte_apple_packages_are_not_reported_as_successful_notes() {
+    let srv=start("empty-rtfd");
+    let r=post_json(&srv,&format!("/{}/uploads",srv.token),serde_json::json!({"id":"empty-rtfd-001","name":"Note.rtfd.zip","size":0}));
+    assert_eq!(r.status,422);
+    assert!(r.json()["error"].as_str().unwrap().contains("RTFD"));
+    assert!(get(&srv,&format!("/{}/files",srv.token)).json().as_array().unwrap().is_empty());
+    // Empty plain text remains a legitimate file.
+    upload(&srv,"empty.txt",b"");
+    assert_eq!(std::fs::metadata(srv.dir.join("empty.txt")).unwrap().len(),0);
+}

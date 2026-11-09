@@ -9,7 +9,7 @@ const IMAGE_EXTS=['jpg','jpeg','png','gif','webp','heic','svg','bmp','ico','avif
 const VIDEO_EXTS=['mp4','mov','avi','mkv','webm','m4v'];
 const AUDIO_EXTS=['mp3','wav','m4a','aac','flac','ogg','oga','opus','weba','aiff','wma','mid','midi'];
 const CODE_EXTS=['py','pyw','js','mjs','cjs','ts','tsx','jsx','java','c','cc','cpp','cxx','h','hpp','cs','go','rs','php','rb','swift','kt','kts','dart','lua','pl','r','sh','bash','zsh','bat','cmd','ps1','sql','html','htm','css','scss','sass','less','json','xml','yaml','yml','toml','ini','cfg','conf','vue','svelte','ipynb'];
-const DOC_EXTS=['pdf','doc','docx','txt','rtf','odt','pages','xls','xlsx','csv','tsv','ppt','pptx','key','numbers','md'];
+const DOC_EXTS=['pdf','doc','docx','txt','rtf','rtfd','odt','pages','xls','xlsx','csv','tsv','ppt','pptx','key','numbers','md'];
 
 function copyText(text){
   if(navigator.clipboard&&window.isSecureContext) return navigator.clipboard.writeText(text);
@@ -98,24 +98,53 @@ fi.addEventListener('change',()=>{
 ['dragleave','drop'].forEach(e=>dz.addEventListener(e,ev=>{
   ev.preventDefault();dz.classList.remove('drag-over');
 }));
-dz.addEventListener('drop',ev=>{
-  const dt=ev.dataTransfer;
-  if(!dt||!dt.files.length) return;
-  const files=Array.from(dt.files);
-  let folders=0;
-  if(dt.items&&dt.items.length===files.length){
-    const keep=[];
-    for(let i=0;i<files.length;i++){
-      const it=dt.items[i];
-      const entry=it&&it.webkitGetAsEntry?it.webkitGetAsEntry():null;
-      if(entry&&entry.isDirectory) folders++;
-      else keep.push(files[i]);
+const folderPaths=new WeakMap();
+const folderInput=$('#folderInput');
+$('#folderPick').addEventListener('click',()=>folderInput.click());
+folderInput.addEventListener('change',()=>{
+  const files=Array.from(folderInput.files||[]);
+  files.forEach(f=>folderPaths.set(f,f.webkitRelativePath||f.name));
+  if(files.length) sendFolder(files,[]);
+  else toast('No files were selected. Empty folders can be sent by drag and drop.','error');
+  folderInput.value='';
+});
+function sendFolder(files,directories){
+  const roots=new Set([...files.map(f=>(folderPaths.get(f)||f.name).split('/')[0]),...directories.map(p=>p.split('/')[0])]);
+  const root=roots.size===1?[...roots][0]:null;
+  return uploadFiles(files,{bundle:true,directories,name:root?root+'.zip':undefined});
+}
+async function readDroppedEntry(entry,prefix,files,directories){
+  const path=prefix+entry.name;
+  if(entry.isDirectory){
+    directories.push(path+'/');
+    const reader=entry.createReader();
+    while(true){
+      const children=await withDeadline(()=>new Promise((resolve,reject)=>reader.readEntries(resolve,reject)),60000);
+      if(!children.length) break;
+      for(const child of children) await readDroppedEntry(child,path+'/',files,directories);
     }
-    if(folders) toast(folders===1?'Folders can\'t be sent — zip it first':folders+' folders skipped — zip them first','error');
-    if(keep.length) handleFiles(keep);
-    return;
+  }else{
+    const file=await withDeadline(()=>new Promise((resolve,reject)=>entry.file(resolve,reject)),60000);
+    folderPaths.set(file,path);files.push(file);
   }
-  handleFiles(files);
+  if(files.length+directories.length>5000) throw new Error('Send folders with at most 5000 entries at a time.');
+}
+dz.addEventListener('drop',async ev=>{
+  const dt=ev.dataTransfer;
+  if(!dt) return;
+  // Capture entries while the drop event still owns the browser's data store.
+  const files=Array.from(dt.files||[]);
+  const entries=Array.from(dt.items||[]).map(it=>it.webkitGetAsEntry?it.webkitGetAsEntry():null);
+  if(entries.some(e=>e&&e.isDirectory)){
+    try{
+      const collected=[],directories=[];
+      for(const entry of entries){
+        if(!entry) throw new Error('This browser cannot read the dropped folder. Use Send Folder.');
+        await readDroppedEntry(entry,'',collected,directories);
+      }
+      await sendFolder(collected,directories);
+    }catch(e){toast(e.message||'Folder could not be read. Try Send Folder.','error');}
+  }else if(files.length) handleFiles(files);
 });
 
 const ZIP_THRESHOLD=3;
@@ -155,6 +184,7 @@ function fmtSpeed(bps){
 }
 
 function getFileKind(name){
+  if(name.toLowerCase().endsWith('.rtfd.zip')) return 'document';
   const ext=name.includes('.') ? name.split('.').pop().toLowerCase() : '';
   if(IMAGE_EXTS.includes(ext)) return 'image';
   if(VIDEO_EXTS.includes(ext)) return 'video';
@@ -317,7 +347,7 @@ async function apiJSON(method,url,body){
     try{data=await r.json();}catch(e){if(r.ok) throw new Error('Invalid server response');}
     if(!r.ok){const err=new Error(data.error||('HTTP '+r.status));err.status=r.status;err.data=data;throw err;}
     return data;
-  },url.includes('/uploads')?UT.requestMs:120000,()=>controller.abort());
+  },url.includes('/uploads')?UT.requestMs:(url.endsWith('/bundle')?(UT.bundleMs||120000):120000),()=>controller.abort());
 }
 function retryable(e){
   return !e.status||e.status===408||e.status===409||(e.status>=500&&e.status!==507);
@@ -395,11 +425,14 @@ async function sendFrom(id,file,offset,task){
   });
 }
 async function uploadOne(file,task){
-  const id=uploadIdFor(file);
+  const id=task.id||uploadIdFor(file);
+  if(file.size===0&&/\.rtfd(?:\.zip)?$/i.test(file.name)){
+    const e=new Error('No RTFD data was supplied by the browser. In Files, compress the original note package, then select that ZIP, or export as RTF/PDF.');e.status=422;throw e;
+  }
   task.state='starting';task.attempt=0;
   let start=null,attempt=0;
   while(!start){
-    try{start=await apiJSON('POST',API+'/uploads',{id,name:file.name,size:file.size});}
+    try{start=await apiJSON('POST',API+'/uploads',{id,name:file.name,size:file.size,...(task.batch?{batch:task.batch}:{})});}
     catch(e){
       if(!retryable(e)||++attempt>8) throw e;
       task.state='reconnecting';task.attempt=attempt;
@@ -521,23 +554,39 @@ function finishUploadUI(){
 async function uploadFiles(files,opts){
   opts=opts||{};
   files=Array.from(files||[]).filter(f=>f&&typeof f.size==='number');
-  if(!files.length) return [];
+  const directories=opts.directories||[];
+  if(!files.length&&!directories.length) return [];
+  if(files.length+directories.length>5000){toast('Send at most 5000 entries at a time.','error');return [];}
+  const batch=opts.bundle?uploadIdFor({name:'archive',size:0}):null;
+  const usedPaths=new Set();
+  const paths=files.map(f=>{
+    const original=folderPaths.get(f)||f.name;
+    let path=original,n=1;
+    while(usedPaths.has(path)){
+      const dot=original.lastIndexOf('.'),slash=original.lastIndexOf('/');
+      path=dot>slash?original.slice(0,dot)+' ('+(n++)+')'+original.slice(dot):original+' ('+(n++)+')';
+    }
+    usedPaths.add(path);return path;
+  });
+  if(batch&&new TextEncoder().encode(JSON.stringify([...paths,...directories])).length>1000000){toast('Folder paths are too large for one transfer. Send smaller folders.','error');return [];}
+  const manifest=directories.map(path=>({path}));
   uploadState.batches++;
   uploadState.total+=files.reduce((a,f)=>a+f.size,0);
   uploadState.files+=files.length;
-  uploadState.current=files[0].name;
+  uploadState.current=files.length?files[0].name:'Empty folder';
   startUploadUI();
-  const queue=files.slice(),names=[];
+  const queue=files.map((file,i)=>({file,path:paths[i]})),names=[];
   let failed=0;
   const worker=async()=>{
     while(queue.length){
-      const file=queue.shift();
-      const task={confirmed:0,clientBytes:0,serverBytes:0,quietMs:0};
+      const item=queue.shift(),file=item.file;
+      const task={confirmed:0,clientBytes:0,serverBytes:0,quietMs:0,batch,id:uploadIdFor(file)};
       uploadState.tasks.add(task);
       uploadState.current=file.name;
       try{
         const res=await uploadOne(file,task);
         names.push(res.name);
+        if(batch) manifest.push({id:task.id,path:item.path,size:file.size});
         uploadState.done++;
       }catch(e){
         failed++;uploadState.failed++;
@@ -545,7 +594,7 @@ async function uploadFiles(files,opts){
           ? '✗ '+file.name+' can\'t be read anymore — pick it again'
           : (e&&e.status===507
             ? '✗ Not enough space on the computer for '+file.name
-            : '✗ '+file.name+' failed'),'error');
+            : '✗ '+file.name+': '+(e.message||'failed')),'error');
       }
       uploadState.tasks.delete(task);
       uploadState.doneBytes+=file.size;
@@ -554,15 +603,29 @@ async function uploadFiles(files,opts){
   const workers=[];
   for(let i=0;i<Math.min(UPLOAD_PARALLEL,files.length);i++) workers.push(worker());
   await Promise.all(workers);
-  if(opts.bundle&&names.length>1){
-    $('#uploadSpeed').textContent='Bundling into a zip...';
-    try{
-      await apiJSON('POST',API+'/bundle',{names});
-      toast('✓ '+names.length+' files zipped & sent','success');
-    }catch(e){toast('✗ Zip failed — files were sent separately','error');}
-  } else if(!failed){
+  if(batch){
+    if(failed){
+      toast('Archive incomplete — no ZIP was created. Send the batch again.','error');
+      names.length=0;
+    }else{
+      $('#uploadSpeed').textContent='Saving archive on the computer…';
+      const body={batch,entries:manifest,name:opts.name};
+      try{
+        let result;
+        for(let attempt=0;;attempt++){
+          try{result=await apiJSON('POST',API+'/bundle',body);break;}
+          catch(e){if(!retryable(e)||attempt>=5) throw e;await waitOrKick(Math.min(8000,800*(attempt+1)));}
+        }
+        names.splice(0,names.length,result.name);
+        toast('✓ '+result.name+' saved','success');
+      }catch(e){
+        uploadState.failed++;names.length=0;
+        toast('✗ Archive was not confirmed: '+(e.message||'send the batch again'),'error');
+      }
+    }
+  }else if(!failed){
     toast(files.length===1?('✓ '+files[0].name+' sent'):('✓ '+files.length+' files sent'),'success');
-  } else if(names.length){
+  }else if(names.length){
     toast('Sent '+names.length+' of '+files.length+' files','error');
   }
   uploadState.batches--;

@@ -368,9 +368,11 @@ body{
 <div class="dropzone glass fade-in app-drop" id="dropzone" style="animation-delay:.1s">
   <span class="drop-icon">⬆️</span>
   <h2>Send Files</h2>
-  <p>Tap here or drag & drop anything</p>
+  <p>Tap here or drag & drop files and folders</p>
   <input type="file" id="fileInput" multiple>
 </div>
+
+<div style="text-align:center;padding:10px"><button type="button" id="folderPick" class="ext-btn">📁 Send Folder</button><input type="file" id="folderInput" webkitdirectory multiple hidden></div>
 
 <div class="upload-bar glass app-upload" id="uploadBar">
   <div class="upload-info">

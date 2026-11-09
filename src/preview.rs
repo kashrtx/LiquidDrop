@@ -118,8 +118,12 @@ fn zip_entry(data: &[u8], wanted: &str, max_out: usize) -> Result<Vec<u8>, Strin
         let clen = rd16(data, p + 32).ok_or_else(bad)?;
         let local = rd32(data, p + 42).ok_or_else(bad)?;
         let name = data.get(p + 46..p + 46 + nlen).ok_or_else(bad)?;
-        if name == wanted.as_bytes() {
-            if usize_ > max_out {
+        let rtfd_match = wanted == "@rtfd" && {
+            let n = String::from_utf8_lossy(name).to_ascii_lowercase();
+            !n.starts_with("__macosx/") && (n == "txt.rtf" || n.ends_with(".rtfd/txt.rtf"))
+        };
+        if name == wanted.as_bytes() || rtfd_match {
+            if usize_ > max_out || (method == 0 && csize > max_out) {
                 return Err("DOCX is too large to preview.".to_string());
             }
             if data.get(local..local + 4) != Some(&[0x50, 0x4b, 0x03, 0x04][..]) {
@@ -137,6 +141,7 @@ fn zip_entry(data: &[u8], wanted: &str, max_out: usize) -> Result<Vec<u8>, Strin
                         .take(max_out as u64 + 1)
                         .read_to_end(&mut out)
                         .map_err(|_| bad())?;
+                    if out.len() > max_out { return Err("Document text is too large to preview.".into()); }
                     Ok(out)
                 }
                 _ => Err(bad()),
@@ -318,11 +323,89 @@ fn read_docx(path: &Path) -> Result<(String, bool), String> {
     Ok((text, truncated))
 }
 
+
+/// Extract a plain-text view; keep original rich text and attachments unchanged.
+fn rtf_text(raw: &[u8]) -> String {
+    let mut out: Vec<u16> = Vec::new();
+    let mut stack = Vec::new();
+    let (mut skip, mut uc, mut fallback) = (false, 1usize, 0usize);
+    let mut i = 0;
+    while i < raw.len() {
+        let c = raw[i]; i += 1;
+        match c {
+            b'{' => { stack.push((skip, uc)); }
+            b'}' => {
+                if let Some((s,u)) = stack.pop() { skip=s; uc=u; }
+                if stack.is_empty() { break; }
+            }
+            b'\\' => {
+                if i >= raw.len() { break; }
+                let c = raw[i]; i += 1;
+                if c == b'*' { skip=true; continue; }
+                if c == b'\'' {
+                    if i + 2 > raw.len() { break; }
+                    let hex=std::str::from_utf8(&raw[i..i+2]).unwrap_or(""); i+=2;
+                    if fallback > 0 { fallback-=1; continue; }
+                    if !skip { if let Ok(b)=u8::from_str_radix(hex,16) { out.extend(decode_text(&[b],false).encode_utf16()); } }
+                } else if c.is_ascii_alphabetic() {
+                    let start=i-1;
+                    while i < raw.len() && raw[i].is_ascii_alphabetic() { i+=1; }
+                    let word=&raw[start..i];
+                    let number_start=i;
+                    if raw.get(i)==Some(&b'-') { i+=1; }
+                    while i < raw.len() && raw[i].is_ascii_digit() { i+=1; }
+                    let n=std::str::from_utf8(&raw[number_start..i]).unwrap_or("").parse::<i32>().unwrap_or(0);
+                    if raw.get(i)==Some(&b' ') { i+=1; }
+                    if word==b"bin" { i=i.saturating_add(n.max(0) as usize).min(raw.len()); continue; }
+                    if [b"fonttbl".as_slice(),b"colortbl",b"stylesheet",b"info",b"pict",b"object",b"NeXTGraphic",b"fldinst"].contains(&word) { skip=true; }
+                    if skip { continue; }
+                    match word {
+                        b"uc" => uc=n.clamp(0,16) as usize,
+                        b"u" => { out.push(n as u16); fallback=uc; }
+                        b"par" | b"line" => out.push(10),
+                        b"tab" => out.push(9),
+                        b"emdash" => out.push(0x2014), b"endash" => out.push(0x2013),
+                        b"lquote" | b"rquote" => out.push(0x27),
+                        b"ldblquote" | b"rdblquote" => out.push(0x22),
+                        _ => {},
+                    }
+                } else if fallback > 0 { fallback-=1; }
+                else if !skip {
+                    match c { b'\\'|b'{'|b'}' => out.push(c as u16), b'~' => out.push(0xa0), b'_' => out.push(0x2011), _=>{} }
+                }
+            }
+            b'\r' | b'\n' => {},
+            _ if fallback > 0 => { fallback-=1; },
+            _ if !skip => out.extend(decode_text(&[c],false).encode_utf16()),
+            _ => {},
+        }
+        if out.len() >= MAX_DOCUMENT_PREVIEW { break; }
+    }
+    String::from_utf16_lossy(&out)
+}
+
+fn read_rtfd(path: &Path) -> Result<(String,bool),String> {
+    let f=File::open(path).map_err(|_| "RTFD could not be read.")?;
+    let mut data=Vec::new();
+    f.take(200*1024*1024+1).read_to_end(&mut data).map_err(|_| "RTFD could not be read.")?;
+    if data.is_empty() { return Err("This received RTFD contains no data. Send the original note again as RTF/PDF or a compressed package.".into()); }
+    if data.len()>200*1024*1024 { return Err("RTFD is too large to preview; download the original.".into()); }
+    let raw=if data.starts_with(b"PK") {
+        zip_entry(&data,"@rtfd",MAX_DOCUMENT_PREVIEW*4).map_err(|_| "RTFD package text could not be read. Download the original to open it in an Apple app.")?
+    } else { data };
+    let start=memchr::memmem::find(&raw,b"{\\rtf").ok_or("RTFD contains no supported rich-text document.")?;
+    let text=rtf_text(&raw[start..]);
+    let truncated=text.len()>=MAX_DOCUMENT_PREVIEW;
+    Ok((text,truncated))
+}
+
 /// Payload for GET /{token}/document-preview/{name}. Err = HTTP 415 message.
 pub fn document_preview(name: &str, path: &Path) -> Result<Value, String> {
     let ext = util::extension_of(name);
     let lower = name.to_lowercase();
-    let (kind, (text, truncated)) = if ext == "docx" {
+    let (kind, (text, truncated)) = if ext == "rtfd" || ext == "rtf" || lower.ends_with(".rtfd.zip") {
+        ("rtfd", read_rtfd(path)?)
+    } else if ext == "docx" {
         ("docx", read_docx(path)?)
     } else if TEXT_PREVIEW_EXTS.contains(&ext.as_str()) || TEXT_PREVIEW_NAMES.contains(&lower.as_str()) {
         ("text", read_text(path)?)
@@ -341,6 +424,31 @@ pub fn document_preview(name: &str, path: &Path) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apple_rich_text_extracts_content_without_formatting_tables() {
+        let rtf=br"{\rtf1\ansi{\fonttbl{\f0 Helvetica;}}Hello \b note\b0\par Unicode \u-10179?\u-8704? {\*\NeXTGraphic photo.png}end}";
+        assert_eq!(rtf_text(rtf), "Hello note\nUnicode 😀 end");
+        assert_eq!(rtf_text(br"{\rtf1 caf\'e9 \{ok\}}"), "café {ok}");
+    }
+
+    #[tokio::test]
+    async fn zipped_rtfd_preview_preserves_the_original_package() {
+        let dir=std::env::temp_dir().join(format!("ld-rtfd-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("text");
+        std::fs::write(&source,br"{\rtf1\ansi Hello from Notes\par second line}").unwrap();
+        let entry=crate::zipstream::ZipEntry {name:"Memo.rtfd/TXT.rtf".into(),path:source.clone(),size:std::fs::metadata(&source).unwrap().len(),mtime:1_700_000_000};
+        let mut zip=Vec::new();
+        crate::zipstream::write_zip(&[entry],&mut zip, |_|{}).await.unwrap();
+        let target=dir.join("Memo.rtfd.zip");
+        std::fs::write(&target,&zip).unwrap();
+        let result=document_preview("Memo.rtfd.zip",&target).unwrap();
+        assert_eq!(result["text"],"Hello from Notes\nsecond line");
+        assert_eq!(std::fs::read(&target).unwrap(),zip);
+        assert!(document_preview("Memo.rtfd",&source).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn docx_walk() {

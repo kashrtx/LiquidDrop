@@ -9,6 +9,7 @@
 mod term;
 
 mod app;
+mod bundle;
 mod assets;
 mod auth;
 mod config;

@@ -36,7 +36,7 @@ const hash = b => createHash('sha256').update(b).digest('hex');
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
-    await page.addInitScript(() => { window.LD_UPLOAD_TIMING = {requestMs:700,stallMs:1500,pollMs:100,slowMs:400}; });
+    await page.addInitScript(() => { window.LD_UPLOAD_TIMING = {requestMs:700,stallMs:1500,pollMs:100,slowMs:400,bundleMs:700}; });
     for (const mode of (process.env.LD_BENCHMARK ? ['throughput'] : ['normal-mp4','mixed','lost-start','lost-put-reply','lost-complete','native-stall','storage-full'])) {
       await page.goto(`http://127.0.0.1:${port}/${token}/`);
       let injected = false, puts = 0;
@@ -100,6 +100,128 @@ const hash = b => createHash('sha256').update(b).digest('hex');
       console.log('PASS real browser: '+mode+'; all file hashes match; '+puts+' PUTs; '+((Date.now()-started)/1000).toFixed(2)+'s');
       if (mode === 'normal-mp4' || mode === 'throughput' && !process.env.LD_ALLOW_CHUNKED) assert.equal(puts,1,'healthy video should stream in a single request');
       if (mode === 'native-stall') assert.equal(puts,4,'failed native request should switch to three bounded buffers');
+    }
+
+    if (!process.env.LD_BENCHMARK) {
+      function unzipStored(data) {
+        const end=data.lastIndexOf(Buffer.from([0x50,0x4b,0x05,0x06]));
+        assert.ok(end>=0);
+        let at=data.readUInt32LE(end+16);
+        const result=new Map();
+        for(let i=0;i<data.readUInt16LE(end+10);i++){
+          assert.equal(data.readUInt32LE(at),0x02014b50);
+          const size=data.readUInt32LE(at+24), n=data.readUInt16LE(at+28);
+          const name=data.subarray(at+46,at+46+n).toString();
+          const local=data.readUInt32LE(at+42);
+          const start=local+30+data.readUInt16LE(local+26)+data.readUInt16LE(local+28);
+          result.set(name,data.subarray(start,start+size));
+          at+=46+n+data.readUInt16LE(at+30)+data.readUInt16LE(at+32);
+        }
+        return result;
+      }
+      await page.goto(`http://127.0.0.1:${port}/${token}/`);
+      const project=path.join(dir,'.input','Project');
+      await fs.mkdir(path.join(project,'nested'),{recursive:true});
+      const expected=new Map();
+      // More than a directory-reader page; also verify duplicate leaf names.
+      for(let i=0;i<130;i++){
+        const name=`file-${i}.txt`,data=Buffer.from(`content ${i}`);
+        await fs.writeFile(path.join(project,name),data);
+        expected.set('Project/'+name,data);
+      }
+      await fs.writeFile(path.join(project,'nested','file-0.txt'),'different content');
+      expected.set('Project/nested/file-0.txt',Buffer.from('different content'));
+      let lost=false;
+      await page.route('**/bundle',async route=>{
+        if(!lost){lost=true;await route.fetch();return;}
+        await route.continue();
+      });
+      const before=(await fs.readdir(dir)).filter(n=>n.endsWith('.zip'));
+      await page.locator('#folderInput').setInputFiles(project);
+      await page.waitForFunction(()=>uploadState.batches===0,null,{timeout:60000});
+      assert.equal(await page.locator('#uploadPct').textContent(),'100%');
+      const contents=unzipStored(await fs.readFile(path.join(dir,'Project.zip')));
+      assert.equal(contents.size,expected.size);
+      for(const [name,data] of expected) assert.equal(hash(contents.get(name)),hash(data));
+      const after=(await fs.readdir(dir)).filter(n=>n.endsWith('.zip'));
+      assert.equal(after.length,before.length+1,'lost bundle reply must create exactly one archive');
+      assert.ok(!(await fs.readdir(dir)).some(n=>n.startsWith('file-')),'no loose folder files');
+      assert.ok(!(await fs.readdir(path.join(dir,'.partial'))).some(n=>n.startsWith('staged-')));
+      await page.unroute('**/bundle');
+      console.log('PASS real browser: folder picker, 131 files, nested duplicate names, lost bundle reply, no loose files');
+
+      // A native Apple RTFD directory becomes a valid package with readable text.
+      const rtfd=path.join(dir,'.input','Memo.rtfd');
+      await fs.mkdir(rtfd,{recursive:true});
+      await fs.writeFile(path.join(rtfd,'TXT.rtf'),String.raw`{\rtf1\ansi Hello from Notes\par Second line}`);
+      const attachment=randomBytes(333);
+      await fs.writeFile(path.join(rtfd,'image.png'),attachment);
+      await page.locator('#folderInput').setInputFiles(rtfd);
+      await page.waitForFunction(()=>uploadState.batches===0,null,{timeout:30000});
+      const packageBytes=await fs.readFile(path.join(dir,'Memo.rtfd.zip'));
+      const packageFiles=unzipStored(packageBytes);
+      assert.equal(hash(packageFiles.get('Memo.rtfd/image.png')),hash(attachment));
+      const preview=await page.request.get(`http://127.0.0.1:${port}/${token}/document-preview/Memo.rtfd.zip`);
+      assert.equal(preview.status(),200);
+      assert.equal((await preview.json()).text,'Hello from Notes\nSecond line');
+      assert.equal(await page.evaluate(()=>getFileKind('Memo.rtfd.zip')),'document');
+      console.log('PASS real browser: real RTFD package upload, text preview, attachments preserved');
+
+      // A package exported by the picker with no bytes must not become a success.
+      await page.locator('#fileInput').setInputFiles([{name:'Broken.rtfd.zip',mimeType:'application/zip',buffer:Buffer.alloc(0)}]);
+      await page.waitForFunction(()=>uploadState.batches===0);
+      assert.equal(await page.locator('#uploadPct').textContent(),'1 failed');
+      await assert.rejects(fs.stat(path.join(dir,'Broken.rtfd.zip')),{code:'ENOENT'});
+      console.log('PASS real browser: empty RTFD export rejected, without changing valid empty text files');
+
+      // Zip & Send must handle identically named selected files without losing either.
+      const duplicated=[{name:'same.txt',mimeType:'text/plain',buffer:Buffer.from('first')},
+        {name:'same.txt',mimeType:'text/plain',buffer:Buffer.from('second')},
+        {name:'other.txt',mimeType:'text/plain',buffer:Buffer.from('third')}];
+      const zipsBefore=new Set((await fs.readdir(dir)).filter(n=>n.endsWith('.zip')));
+      await page.locator('#fileInput').setInputFiles(duplicated);
+      await page.locator('#btnZip').click();
+      await page.waitForFunction(()=>uploadState.batches===0,null,{timeout:30000});
+      const created=(await fs.readdir(dir)).filter(n=>n.endsWith('.zip')&&!zipsBefore.has(n));
+      assert.equal(created.length,1);
+      const zipped=unzipStored(await fs.readFile(path.join(dir,created[0])));
+      assert.equal(zipped.get('same.txt').toString(),'first');
+      assert.equal(zipped.get('same (1).txt').toString(),'second');
+      assert.equal(zipped.get('other.txt').toString(),'third');
+      console.log('PASS real browser: Zip & Send preserves duplicate filenames without loose output');
+
+      const visibleBefore=new Set((await fs.readdir(dir)).filter(n=>!n.startsWith('.')));
+      let rejected=false;
+      await page.route('**/uploads/**',async route=>{
+        if(route.request().method()==='PUT'&&!rejected){rejected=true;await route.fulfill({status:507,contentType:'application/json',body:'{"error":"Disk full"}'});return;}
+        await route.continue();
+      });
+      await page.locator('#fileInput').setInputFiles(['a','b','c'].map(n=>({name:`partial-${n}.txt`,mimeType:'text/plain',buffer:Buffer.from(n)})));
+      await page.locator('#btnZip').click();
+      await page.waitForFunction(()=>uploadState.batches===0,null,{timeout:30000});
+      assert.equal(await page.locator('#uploadPct').textContent(),'1 failed');
+      assert.deepEqual(new Set((await fs.readdir(dir)).filter(n=>!n.startsWith('.'))),visibleBefore,'failed batch must not publish a partial ZIP or loose files');
+      await page.unroute('**/uploads/**');
+      console.log('PASS real browser: a failed ZIP batch publishes neither a partial archive nor loose files');
+
+      await page.evaluate(()=>{
+        const children=Array.from({length:130},(_,i)=>({name:`entry-${i}.txt`,isDirectory:false,file:resolve=>resolve(new File([`data ${i}`],`entry-${i}.txt`))}));
+        children.push({name:'empty',isDirectory:true,createReader:()=>({readEntries:resolve=>resolve([])})});
+        const root={name:'Dropped',isDirectory:true,createReader:()=>{
+          let offset=0;
+          return {readEntries:resolve=>{const page=children.slice(offset,offset+100);offset+=100;resolve(page);}};
+        }};
+        const event=new Event('drop',{bubbles:true,cancelable:true});
+        Object.defineProperty(event,'dataTransfer',{value:{files:[],items:[{webkitGetAsEntry:()=>root}]}});
+        document.querySelector('#dropzone').dispatchEvent(event);
+      });
+      await page.waitForFunction(()=>Array.from(document.querySelectorAll('.file-name')).some(e=>e.textContent==='Dropped.zip'),null,{timeout:60000});
+      const dropped=unzipStored(await fs.readFile(path.join(dir,'Dropped.zip')));
+      assert.equal(dropped.size,132); // root directory, 130 files, and an empty subfolder
+      assert.ok(dropped.has('Dropped/empty/'));
+      assert.equal(dropped.get('Dropped/entry-129.txt').toString(),'data 129');
+      console.log('PASS real browser: directory drag and drop reads every browser page and preserves empty folders');
+
     }
     assert.deepEqual(errors, []);
   } finally {

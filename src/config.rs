@@ -11,7 +11,7 @@ pub const DEFAULT_PORT: u16 = 7777;
 pub const BUILD_ID: &str = env!("LIQUIDDROP_BUILD_ID");
 
 pub const CHUNK: usize = 256 * 1024;
-pub const MAX_JSON_BODY: usize = 512 * 1024;
+pub const MAX_JSON_BODY: usize = 2 * 1024 * 1024;
 pub const MAX_EXTENSION_ASSET: u64 = 64 * 1024 * 1024;
 pub const MAX_EXTENSION_SHARED_STATE: usize = 256 * 1024;
 pub const MAX_DOCUMENT_PREVIEW: usize = 2 * 1024 * 1024;

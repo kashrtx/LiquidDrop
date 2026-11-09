@@ -10,7 +10,7 @@
     'docx', 'txt', 'text', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'xml', 'html', 'htm', 'css',
     'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'cs',
     'php', 'swift', 'kt', 'kts', 'sh', 'bash', 'zsh', 'ps1', 'bat', 'cmd', 'sql', 'yaml', 'yml', 'toml',
-    'ini', 'cfg', 'conf', 'log', 'env', 'gitignore', 'rtf', 'srt', 'vtt'
+    'ini', 'cfg', 'conf', 'log', 'env', 'gitignore', 'rtf', 'rtfd', 'srt', 'vtt'
   ]);
   const documentNames = new Set(['dockerfile', 'makefile', 'license', 'readme', '.env']);
   const pdfSources = [
@@ -47,6 +47,7 @@
   function ext(name) { return String(name || '').includes('.') ? String(name).split('.').pop().toLowerCase() : ''; }
   function basename(name) { return String(name || '').split(/[\\/]/).pop().toLowerCase(); }
   function kind(name) {
+    if (String(name).toLowerCase().endsWith('.rtfd.zip')) return 'document';
     const e = ext(name);
     if (imageExts.has(e)) return 'image';
     if (videoExts.has(e)) return 'video';
@@ -738,7 +739,7 @@
     const doc = document.createElement('article');
     doc.className = 'ld-preview-doc';
     doc.dataset.zoomMode = 'document';
-    const label = (payload.kind === 'docx' ? 'DOCX document' : 'Text document') + (payload.truncated ? ' - Preview truncated' : '');
+    const label = (payload.kind === 'docx' ? 'DOCX document' : payload.kind === 'rtfd' ? 'Apple rich text — text preview; attachments kept in original' : 'Text document') + (payload.truncated ? ' - Preview truncated' : '');
     doc.innerHTML = '<h3>' + esc(name) + '</h3><div class="ld-preview-doc-meta">' + esc(label) + '</div><pre>' + esc(payload.text || '') + '</pre>';
     activeMedia = doc;
     content.innerHTML = '';

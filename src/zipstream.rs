@@ -116,12 +116,12 @@ pub async fn write_zip<W: AsyncWrite + Unpin>(
         ut_extra(&mut h, e.mtime);
         w.write_all(&h).await?;
 
-        let mut file = tokio::fs::File::open(&e.path).await?;
+        let mut file = if e.name.ends_with('/') { None } else { Some(tokio::fs::File::open(&e.path).await?) };
         let mut hasher = crc32fast::Hasher::new();
         let mut left = e.size;
         while left > 0 {
             let want = (buf.len() as u64).min(left) as usize;
-            let n = file.read(&mut buf[..want]).await?;
+            let n = file.as_mut().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Directory has data"))?.read(&mut buf[..want]).await?;
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -196,7 +196,7 @@ pub async fn write_zip<W: AsyncWrite + Unpin>(
         put16(&mut cd, 0); // comment
         put16(&mut cd, 0); // disk
         put16(&mut cd, 0); // internal attrs
-        put32(&mut cd, 0o100644u32 << 16); // external attrs: regular file rw-r--r--
+        put32(&mut cd, if e.name.ends_with(b"/") { (0o040755u32 << 16) | 0x10 } else { 0o100644u32 << 16 }); // external attrs: regular file rw-r--r--
         put32(&mut cd, if big_off { U32_MAX as u32 } else { e.offset as u32 });
         cd.extend_from_slice(&e.name);
         cd.extend_from_slice(&extra);

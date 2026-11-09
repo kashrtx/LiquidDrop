@@ -1,5 +1,14 @@
 # Changelog
 
+## 5.1.0
+
+- Recognize Apple RTFD documents and `.rtfd.zip` packages. Preview their rich-text content as readable plain text while preserving the original package and attachments.
+- Report RTFD exports containing no received bytes as failures with recovery instructions, rather than publishing a zero-byte note. Existing received files are left intact.
+- Add **Send Folder** and recursive folder drag-and-drop. Upload file data with the existing fast streaming/recovery engine; build one archive on the computer with nested paths intact. Drag-and-drop also preserves empty folders.
+- Make Zip & Send use private staging and all-or-nothing archive creation. Failed transfers no longer silently create incomplete archives or leave loose files in the shared list. Repeated bundling requests return the original archive after a lost reply.
+- Preserve identically named files from different folders; disambiguate duplicate names in ordinary Zip & Send batches. Reject unsafe archive paths.
+- Limit folder batches to 5000 entries and document previews to bounded sizes. Native folder-picker availability depends on the browser; empty-folder selection requires drag-and-drop.
+
 ## 5.0.3
 
 - Restore native file streaming for healthy connections. Large videos no longer copy every 8 MiB into JavaScript memory and wait for a separate upload response per piece.

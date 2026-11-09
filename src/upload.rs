@@ -47,6 +47,11 @@ fn superseded_resp() -> Resp {
     )
 }
 
+fn empty_apple_package(name: &str, size: u64) -> bool {
+    let lower = name.to_ascii_lowercase();
+    size == 0 && (lower.ends_with(".rtfd") || lower.ends_with(".rtfd.zip"))
+}
+
 pub fn valid_upload_id(id: &str) -> bool {
     (8..=80).contains(&id.len())
         && id
@@ -81,6 +86,13 @@ pub async fn start(app: &Arc<App>, body: Value) -> Resp {
         None => return json_error(StatusCode::BAD_REQUEST, "Missing file size."),
     };
     let name = files::sanitize_filename(body.get("name").and_then(|v| v.as_str()).unwrap_or(""));
+    let batch = body.get("batch").and_then(Value::as_str).unwrap_or("");
+    if !batch.is_empty() && !valid_upload_id(batch) {
+        return json_error(StatusCode::BAD_REQUEST, "Invalid archive batch.");
+    }
+    if empty_apple_package(&name, size) {
+        return json_error(StatusCode::UNPROCESSABLE_ENTITY, "The browser supplied no RTFD data. Export the note as RTF/PDF, or compress the package in Files and select the resulting archive.");
+    }
     let _ = tokio::fs::create_dir_all(&app.paths.partial).await;
     let part = part_path(app, &id);
     let meta = meta_path(app, &id);
@@ -109,7 +121,7 @@ pub async fn start(app: &Arc<App>, body: Value) -> Resp {
     }
     if !same || offset > size {
         offset = 0;
-        let record = json!({"id": id, "name": name, "size": size, "created": util::now_secs()});
+        let record = json!({"id": id, "name": name, "size": size, "batch": batch, "created": util::now_secs()});
         if let Err(e) = util::write_json_file(&meta, &record) {
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
         }
@@ -301,19 +313,22 @@ pub async fn complete(app: &Arc<App>, id: &str) -> Resp {
             &json!({"error": "Upload is incomplete.", "offset": have, "size": size}),
         );
     }
-    let root = app.paths.root.clone();
-    let dest = match files::finalize(app, &part, &root, &name).await {
+    let batch = meta.get("batch").and_then(Value::as_str).unwrap_or("");
+    let staged = !batch.is_empty();
+    let root = if staged { app.paths.partial.clone() } else { app.paths.root.clone() };
+    let target_name = if staged { format!("staged-{}-{}", batch, id) } else { name.clone() };
+    let dest = match files::finalize(app, &part, &root, &target_name).await {
         Ok(d) => d,
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
     let _ = tokio::fs::remove_file(&meta_file).await;
-    let final_name = files::file_name_of(&dest);
+    let final_name = if staged { name } else { files::file_name_of(&dest) };
     if let Ok(mut m) = app.completed.lock() {
         m.insert(id.to_string(), (final_name.clone(), size, std::time::Instant::now()));
     }
     say!("  {}⬆  Received:{} {} ({})", CYAN, RESET, final_name, util::fmt_size(size));
     app.forget_upload_lock(id);
-    app.hub.send(LiveEvent::Files);
+    if !staged { app.hub.send(LiveEvent::Files); }
     ok_json(&json!({"status": "ok", "name": final_name, "size": size}))
 }
 
@@ -552,6 +567,10 @@ pub async fn receive_multipart(
                 return Err(e);
             }
             let name = files::sanitize_filename(filename.as_deref().unwrap_or(""));
+            if empty_apple_package(&name, size) {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err("No RTFD data was received. Compress the original package or export the note as RTF/PDF, then send it again.".into());
+            }
             match files::finalize(app, &tmp, target_dir, &name).await {
                 Ok(dest) => saved.push(Saved {
                     name: files::file_name_of(&dest),
