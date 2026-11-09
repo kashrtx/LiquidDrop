@@ -271,12 +271,19 @@ pub async fn complete(app: &Arc<App>, id: &str) -> Resp {
     if !valid_upload_id(id) {
         return json_error(StatusCode::BAD_REQUEST, "Invalid upload id.");
     }
+    let _claim = app.claim_upload(id);
+    let lock = app.upload_lock(id);
+    let _guard = match tokio::time::timeout(Duration::from_secs(15), lock.lock_owned()).await {
+        Ok(g) => g,
+        Err(_) => return json_error(StatusCode::CONFLICT, "Upload is busy."),
+    };
     let meta_file = meta_path(app, id);
     let meta = match util::read_json_file(&meta_file) {
         Some(m) => m,
         None => {
             // Already completed (the phone retried because the reply got lost)?
             let done = app.completed.lock().ok().and_then(|m| m.get(id).cloned());
+            app.forget_upload_lock(id);
             return match done {
                 Some((name, size, _)) => ok_json(&json!({"status": "ok", "name": name, "size": size})),
                 None => json_error(StatusCode::NOT_FOUND, "Unknown upload."),
@@ -287,12 +294,6 @@ pub async fn complete(app: &Arc<App>, id: &str) -> Resp {
     let name = files::sanitize_filename(meta.get("name").and_then(|v| v.as_str()).unwrap_or(""));
     let part = part_path(app, id);
 
-    let _claim = app.claim_upload(id);
-    let lock = app.upload_lock(id);
-    let _guard = match tokio::time::timeout(Duration::from_secs(15), lock.lock_owned()).await {
-        Ok(g) => g,
-        Err(_) => return json_error(StatusCode::CONFLICT, "Upload is busy."),
-    };
     let have = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
     if have != size {
         return json(
@@ -306,12 +307,12 @@ pub async fn complete(app: &Arc<App>, id: &str) -> Resp {
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
     let _ = tokio::fs::remove_file(&meta_file).await;
-    app.forget_upload_lock(id);
     let final_name = files::file_name_of(&dest);
     if let Ok(mut m) = app.completed.lock() {
         m.insert(id.to_string(), (final_name.clone(), size, std::time::Instant::now()));
     }
     say!("  {}⬆  Received:{} {} ({})", CYAN, RESET, final_name, util::fmt_size(size));
+    app.forget_upload_lock(id);
     app.hub.send(LiveEvent::Files);
     ok_json(&json!({"status": "ok", "name": final_name, "size": size}))
 }
@@ -323,7 +324,10 @@ pub async fn cancel(app: &Arc<App>, id: &str) -> Resp {
     }
     let _claim = app.claim_upload(id);
     let lock = app.upload_lock(id);
-    let _guard = tokio::time::timeout(Duration::from_secs(5), lock.lock_owned()).await;
+    let _guard = match tokio::time::timeout(Duration::from_secs(5), lock.lock_owned()).await {
+        Ok(g) => g,
+        Err(_) => return json_error(StatusCode::CONFLICT, "Upload is busy."),
+    };
     let _ = tokio::fs::remove_file(part_path(app, id)).await;
     let _ = tokio::fs::remove_file(meta_path(app, id)).await;
     app.forget_upload_lock(id);

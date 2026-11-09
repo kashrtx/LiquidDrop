@@ -391,3 +391,31 @@ fn stalled_chunk_never_blocks_the_retry() {
     assert_eq!(got.body, data);
     drop(zombie);
 }
+
+#[test]
+fn concurrent_completion_retries_are_idempotent() {
+    let srv = start("complete-race");
+    let id = "concurrent-complete";
+    let data = vec![0x5au8; 200_000];
+    let base = format!("/{}/uploads", srv.token);
+    assert_eq!(post_json(&srv, &base, serde_json::json!({"id": id, "name": "video.mp4", "size": data.len()})).status, 200);
+    assert_eq!(request(srv.port, "PUT", &format!("{}/{}?offset=0", base, id), &[], &data).status, 200);
+    let gate = std::sync::Arc::new(std::sync::Barrier::new(16));
+    let threads: Vec<_> = (0..16).map(|_| {
+        let gate = gate.clone();
+        let path = format!("{}/{}/complete", base, id);
+        let port = srv.port;
+        std::thread::spawn(move || {
+            gate.wait();
+            request(port, "POST", &path, &[], b"")
+        })
+    }).collect();
+    for t in threads {
+        let r = t.join().unwrap();
+        assert_eq!(r.status, 200, "completion retry: {}", r.text());
+        assert_eq!(r.json()["name"], "video.mp4");
+    }
+    let listing = get(&srv, &format!("/{}/files", srv.token)).json();
+    assert_eq!(listing.as_array().unwrap().len(), 1);
+    assert_eq!(std::fs::read(srv.dir.join("video.mp4")).unwrap(), data);
+}

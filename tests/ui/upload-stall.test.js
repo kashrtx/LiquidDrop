@@ -5,6 +5,7 @@
 //   error   - the connection errors part-way (must resume from the saved offset)
 // Usage: node upload-stall.test.js ui/app.js
 const fs = require('fs');
+const assert = require('node:assert/strict');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 
 const stub = new Proxy(function () {}, {
@@ -21,7 +22,7 @@ const stub = new Proxy(function () {}, {
   apply: () => stub,
 });
 global.window = global;
-global.LD_UPLOAD_TIMING = { stallMs: 1500, pollMs: 150, slowMs: 600 };
+global.LD_UPLOAD_TIMING = { stallMs: 1500, pollMs: 150, slowMs: 600, requestMs: 500, readMs: 500 };
 global.document = { querySelector: () => stub, querySelectorAll: () => [], createElement: () => stub,
   addEventListener() {}, body: stub, head: stub, hidden: false, execCommand() {} };
 global.location = { pathname: '/TOKEN/', href: 'http://x/TOKEN/', reload() {} };
@@ -31,12 +32,18 @@ global.addEventListener = () => {};
 global.EventSource = undefined;
 
 let server;
-function freshServer(plan) { server = { files: {}, parts: {}, meta: {}, plan, puts: 0, log: [] }; }
+function freshServer(plan) { server = { files: {}, parts: {}, meta: {}, plan, puts: 0, log: [], hangs: new Set(), completed: {} }; }
 function json(status, obj) { return { ok: status < 400, status, json: async () => obj }; }
 global.fetch = async (url, opts = {}) => {
   const m = (opts.method || 'GET').toUpperCase();
   const parts = new URL(url, 'http://x').pathname.split('/').filter(Boolean);
   const route = parts[1];
+  const phase = route === 'uploads' ? (m === 'GET' ? 'status' : parts[3] === 'complete' ? 'complete' : 'start') : '';
+  const hang = phase && server.plan.hang === phase && !server.hangs.has(phase);
+  if (hang) {
+    server.hangs.add(phase);
+    if (phase !== 'complete') return new Promise(() => {});
+  }
   if (route === 'uploads' && m === 'POST' && parts.length === 2) {
     const b = JSON.parse(opts.body);
     if (!server.meta[b.id] || server.meta[b.id].size !== b.size) { server.meta[b.id] = b; server.parts[b.id] = Buffer.alloc(0); }
@@ -45,10 +52,17 @@ global.fetch = async (url, opts = {}) => {
   if (route === 'uploads' && m === 'GET') { const id = parts[2]; return json(200, { offset: server.parts[id].length }); }
   if (route === 'uploads' && m === 'POST' && parts[3] === 'complete') {
     const id = parts[2], meta = server.meta[id];
-    if (!meta) return json(404, { error: 'Unknown upload.' });
+    if (!meta) return server.completed[id] || json(404, { error: 'Unknown upload.' });
     if (server.parts[id].length !== meta.size) return json(409, { error: 'incomplete', offset: server.parts[id].length });
     server.files[meta.name] = server.parts[id]; delete server.meta[id];
-    return json(200, { status: 'ok', name: meta.name, size: meta.size });
+    const result = json(200, { status: 'ok', name: meta.name, size: meta.size });
+    server.completed[id] = result;
+    if (hang) return new Promise(() => {}); // committed, but response never arrives
+    if (server.plan.hang === 'json' && !server.hangs.has('json')) {
+      server.hangs.add('json');
+      return { ok: true, status: 200, json: () => new Promise(() => {}) };
+    }
+    return result;
   }
   return json(200, []);
 };
@@ -57,6 +71,8 @@ class FakeXHR {
   open(m, url) { this.url = new URL(url, 'http://x'); }
   abort() { if (this.done) return; this.done = true; server.log.push('abort#' + this.n); setTimeout(() => this.onabort && this.onabort(), 0); }
   async send(body) {
+    assert.ok(body instanceof ArrayBuffer, 'read Files-provider data before passing it to XHR');
+    assert.ok(body.byteLength <= 8 * 1024 * 1024, 'bound per-request memory');
     const id = this.url.pathname.split('/')[3];
     const offset = Number(this.url.searchParams.get('offset'));
     this.n = ++server.puts;
@@ -78,6 +94,7 @@ class FakeXHR {
       sent += n;
       if (mode !== 'quiet' && this.upload.onprogress) this.upload.onprogress({ loaded: sent, total: buf.length });
       if (sent < buf.length) return setTimeout(tick, mode === 'quiet' ? Number(process.env.QUIET_DELAY || 40) : 2);
+      if (mode === 'lost-reply') return;
       this.done = true; this.status = 200;
       this.responseText = JSON.stringify({ offset: server.parts[id].length });
       this.onload && this.onload();
@@ -99,13 +116,25 @@ async function scenario(name, plan) {
   const video = crypto.randomBytes(25 * 1024 * 1024 + 4321);
   const files = photos.map((b, i) => new File([b], 'IMG_' + (500 + i) + '.JPG'));
   files.push(new File([video], 'IMG_0599.MOV'));
+  if (plan.solo) files.splice(0, files.length, new File([video], 'local-video.mp4'));
+  if (plan.readHang) {
+    let hung = false;
+    const original = files[0].slice.bind(files[0]);
+    files[0].slice = (start, end) => {
+      const blob = original(start, end);
+      if (!hung) { hung = true; blob.arrayBuffer = () => new Promise(() => {}); }
+      return blob;
+    };
+  }
+  if (plan.mixed) {
+    files.splice(0, files.length, ...['txt','pdf','doc','ipa','mp4','mp4'].map((ext,i) => new File([photos[i]], 'file'+i+'.'+ext)));
+  }
+  const expected = await Promise.all(files.map(async f => [f.name, Buffer.from(await f.arrayBuffer())]));
   const t0 = Date.now();
   const names = await api.uploadFiles(files);
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  const ok = names.length === 12 &&
-    photos.every((b, i) => server.files['IMG_' + (500 + i) + '.JPG'].equals(b)) &&
-    server.files['IMG_0599.MOV'].equals(video);
-  console.log((ok ? 'PASS ' : 'FAIL ') + name + ' — 12 files in ' + secs + 's; requests: ' + server.log.join(' '));
+  const ok = names.length === files.length && expected.every(([name, data]) => server.files[name]?.equals(data));
+  console.log((ok ? 'PASS ' : 'FAIL ') + name + ' — '+files.length+' files in ' + secs + 's; requests: ' + server.log.join(' '));
   clearTimeout(guard);
   if (!ok) { console.log('toasts:', toasts); process.exit(1); }
 }
@@ -117,6 +146,13 @@ async function scenario(name, plan) {
     ['video connection dies silently, twice', { 12: 'dead', 13: 'dead' }],
     ['video connection errors mid-way', { 12: 'error' }],
     ['photo and video both die', { 3: 'dead', 12: 'dead' }],
+    ['single local MP4: upload reply lost at 100%', { solo: true, 1: 'lost-reply' }],
+    ['single local MP4: creation request never returns', { solo: true, hang: 'start' }],
+    ['single local MP4: finalization reply lost after commit', { solo: true, hang: 'complete' }],
+    ['single local MP4: finalization JSON never arrives', { solo: true, hang: 'json' }],
+    ['single local MP4: status request hangs during recovery', { solo: true, 1: 'dead', hang: 'status' }],
+    ['local file read stalls once before sending', { solo: true, readHang: true }],
+    ['mixed documents and multiple MP4s recover automatically', { mixed: true, 5: 'dead', 6: 'lost-reply' }],
   ];
   const only = process.env.SCENARIO;
   for (const [i, [name, plan]] of all.entries()) {

@@ -68,7 +68,7 @@ liquiddrop --dir D:\Shared --no-browser --no-tray --verbose
 
 v5 is a rewrite in Rust. The speed you'll actually feel comes from a new transfer design:
 
-- **Parallel, resumable uploads.** Files go up three at a time in chunks. If the phone sleeps or Wi-Fi drops, the upload continues where it stopped. Unfinished files never show up half-written in the list.
+- **Parallel, resumable uploads.** Files go up two at a time in bounded chunks. If the phone sleeps or Wi-Fi drops, the upload continues where it stopped. Unfinished files never show up half-written in the list.
 - **Instant updates.** One live connection per device replaces the old polling every 2–3 seconds. New files appear immediately and phones use less battery.
 - **Real "download selected".** The computer streams one zip directly (no compression, so it starts instantly). Nothing is buffered in the phone's memory, ZIP64 handles files over 4 GB, and the progress bar is real because the size is known up front.
 - **"Zip & Send" without the memory crash.** Files upload normally and the computer bundles them afterwards.
@@ -133,7 +133,20 @@ cargo test --release           # unit + end-to-end tests
 
 Optional features (on by default): `mdns` (liquiddrop.local), `thumbnails`, and `tray` (Windows and macOS only). Build without them using `cargo build --release --no-default-features`.
 
-To publish downloads, push a tag such as `v5.0.0`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
+The upload regression suite also runs with Node:
+
+```bash
+node tests/ui/upload-stall.test.js ui/app.js
+SCENARIO=1 QUIET_DELAY=250 GUARD_MS=90000 node tests/ui/upload-stall.test.js ui/app.js
+```
+
+An optional real Chromium suite exercises the actual file picker and server,
+including lost replies after files are saved. Install `playwright` outside the
+checkout, set `LD_PLAYWRIGHT` to its module directory, then run
+`node tests/ui/browser-upload.test.js target/release/liquiddrop`.
+`LD_CHROMIUM` can override the default `/usr/bin/chromium` executable.
+
+To publish downloads, push a tag such as `v5.0.2`. GitHub Actions (`.github/workflows/release.yml`) builds Windows, macOS (universal `.app`) and Linux, then attaches them to a release.
 
 ## Project structure
 

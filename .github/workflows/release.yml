@@ -21,8 +21,29 @@ jobs:
             *) echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO. Update Cargo.toml or use tag v$CARGO."; exit 1;;
           esac
 
-  build:
+  test:
     needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit and end-to-end transfer tests
+        run: cargo test --release
+      - name: Upload recovery regressions
+        run: |
+          node tests/ui/upload-stall.test.js ui/app.js
+          SCENARIO=1 QUIET_DELAY=250 GUARD_MS=90000 node tests/ui/upload-stall.test.js ui/app.js
+
+      - name: Real browser transfers and lost-reply recovery
+        run: |
+          npm install --prefix "$RUNNER_TEMP/liquiddrop-browser" --no-audit --no-fund playwright
+          LD_PLAYWRIGHT="$RUNNER_TEMP/liquiddrop-browser/node_modules/playwright" \
+          LD_CHROMIUM="$(command -v google-chrome)" \
+            node tests/ui/browser-upload.test.js target/release/liquiddrop
+
+  build:
+    needs: [check-version, test]
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +73,10 @@ jobs:
       - name: Build
         if: matrix.target != 'universal'
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Windows transfer regression tests
+        if: matrix.os == 'windows-latest'
+        run: cargo test --release --target x86_64-pc-windows-msvc
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'

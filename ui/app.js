@@ -295,39 +295,47 @@ function uploadIdFor(file){
     .map(n=>n.toString(36)).join('');
   return ('u'+DEVICE_ID+'-'+h.toString(36)+'-'+r).replace(/[^A-Za-z0-9_-]/g,'').slice(0,80);
 }
+// Bound both the request and response-body read. Aborting fetch alone is not
+// sufficient: a suspended browser request may never settle its promise.
+function withDeadline(work,ms,onTimeout){
+  let timer;
+  return Promise.race([
+    Promise.resolve().then(work),
+    new Promise((_,reject)=>{timer=setTimeout(()=>{
+      const e=new Error('Request timed out');e.status=408;
+      reject(e);
+      if(onTimeout) onTimeout();
+    },ms);})
+  ]).finally(()=>clearTimeout(timer));
+}
 async function apiJSON(method,url,body){
-  const opts={method,cache:'no-store'};
+  const controller=new AbortController();
+  const opts={method,cache:'no-store',signal:controller.signal};
   if(body!==undefined){opts.headers={'Content-Type':'application/json'};opts.body=JSON.stringify(body);}
-  const r=await fetch(url,opts);
-  let data={};
-  try{data=await r.json();}catch(e){}
-  if(!r.ok){const err=new Error(data.error||('HTTP '+r.status));err.status=r.status;err.data=data;throw err;}
-  return data;
+  return withDeadline(async()=>{
+    const r=await fetch(url,opts);
+    let data={};
+    try{data=await r.json();}catch(e){if(r.ok) throw new Error('Invalid server response');}
+    if(!r.ok){const err=new Error(data.error||('HTTP '+r.status));err.status=r.status;err.data=data;throw err;}
+    return data;
+  },url.includes('/uploads')?UT.requestMs:120000,()=>controller.abort());
 }
 async function sliceReadable(file,offset){
   try{
     const end=Math.min(file.size,offset+1);
     if(end<=offset) return true;
-    await file.slice(offset,end).arrayBuffer();
+    await withDeadline(()=>file.slice(offset,end).arrayBuffer(),UT.readMs);
     return true;
   }catch(e){return false;}
 }
 function retryable(e){
   return !e.status||e.status===408||e.status===409||(e.status>=500&&e.status!==507);
 }
-/* ---- Sending a file ----
-   Each file goes up as ONE streamed request (the browser reads the file
-   itself, exactly like v4 did). Chunking, reading pieces into memory and
-   judging "stalls" from the browser's progress events all proved unreliable
-   on iPhone: Safari often reports no upload progress at all for a while, so
-   healthy uploads were being cancelled and restarted until you tapped the bar.
-
-   Progress and stall detection now come from the COMPUTER: while a request is
-   running we ask it every few seconds how many bytes it has saved. Only if
-   neither the computer nor the browser has seen any new bytes for 30 seconds
-   is the request treated as dead, and then the upload continues from exactly
-   what the computer has (nothing is sent twice). */
-const UT=Object.assign({stallMs:30000,pollMs:3000,slowMs:8000},window.LD_UPLOAD_TIMING||{});
+/* Read bounded pieces before sending. This avoids handing Safari's network
+   process a live Files-provider-backed video, and limits memory to one piece
+   per worker. Progress comes from both the browser and the computer. */
+const UPLOAD_CHUNK=8*1024*1024;
+const UT=Object.assign({stallMs:30000,pollMs:3000,slowMs:8000,requestMs:15000,readMs:60000},window.LD_UPLOAD_TIMING||{});
 const activeXhrs=new Set();
 let uploadKick=0;
 function waitOrKick(ms){
@@ -340,43 +348,52 @@ async function serverOffset(id){
   const st=await apiJSON('GET',API+'/uploads/'+encodeURIComponent(id));
   return Number(st.offset)||0;
 }
-function sendFrom(id,file,offset,task){
+async function sendFrom(id,file,offset,task){
+  const end=Math.min(file.size,offset+UPLOAD_CHUNK);
+  task.state='reading';
+  const body=await withDeadline(()=>file.slice(offset,end).arrayBuffer(),UT.readMs);
+  task.state='sending';
   return new Promise((res,rej)=>{
     const xhr=new XMLHttpRequest();
     activeXhrs.add(xhr);
-    let reason='',lastGrowth=Date.now(),clientLoaded=0,serverSeen=offset,polling=false;
+    let settled=false,reason='',lastGrowth=Date.now(),clientLoaded=0,serverSeen=offset,polling=false;
+    const succeed=d=>{if(settled) return;settled=true;cleanup();res(d);};
+    const fail=e=>{if(settled) return;settled=true;cleanup();rej(e);};
     const poll=setInterval(async()=>{
       if(document.hidden){lastGrowth=Date.now();return;}
       if(!polling){
         polling=true;
         try{
           const so=await serverOffset(id);
+          if(settled) return;
+          if(so>=end){succeed({offset:end});xhr.abort();return;}
           if(so>serverSeen){serverSeen=so;lastGrowth=Date.now();task.serverBytes=so-offset;}
         }catch(_){}
         polling=false;
       }
       task.quietMs=Date.now()-lastGrowth;
-      if(task.quietMs>UT.stallMs){reason='stalled';xhr.abort();}
+      if(task.quietMs>UT.stallMs){reason='stalled';const e=new Error(reason);e.stallReason=reason;fail(e);xhr.abort();}
     },UT.pollMs);
     const cleanup=()=>{clearInterval(poll);activeXhrs.delete(xhr);task.quietMs=0;};
     xhr.open('PUT',API+'/uploads/'+encodeURIComponent(id)+'?offset='+offset);
     xhr.upload.onprogress=e=>{
+      if(settled) return;
       if(e.loaded>clientLoaded){clientLoaded=e.loaded;lastGrowth=Date.now();}
       task.clientBytes=e.loaded;
       task.state='sending';
     };
     xhr.onload=()=>{
-      cleanup();
       let d={};
       try{d=JSON.parse(xhr.responseText||'{}');}catch(e){}
-      if(xhr.status===200) res(d);
-      else{const err=new Error(d.error||('HTTP '+xhr.status));err.status=xhr.status;err.data=d;rej(err);}
+      if(xhr.status===200){
+        if(!Number.isSafeInteger(d.offset)||d.offset<=offset||d.offset>end) fail(new Error('Invalid upload offset'));
+        else succeed(d);
+      }
+      else{const err=new Error(d.error||('HTTP '+xhr.status));err.status=xhr.status;err.data=d;fail(err);}
     };
-    xhr.onerror=()=>{cleanup();rej(new Error('Network error'));};
-    xhr.onabort=()=>{cleanup();const err=new Error(reason||'retry');err.stallReason=reason||'manual';rej(err);};
-    // Whole file when starting fresh (the browser streams it natively);
-    // the remaining part when resuming.
-    xhr.send(offset===0?file:file.slice(offset));
+    xhr.onerror=()=>fail(new Error('Network error'));
+    xhr.onabort=()=>{const err=new Error(reason||'retry');err.stallReason=reason||'manual';fail(err);};
+    try{xhr.send(body);}catch(e){fail(e);}
   });
 }
 async function uploadOne(file,task){
@@ -442,7 +459,7 @@ function uploadedBytes(){
 function renderUploadUI(){
   const pct=$('#uploadPct'),fill=$('#progressFill'),name=$('#uploadName'),spd=$('#uploadSpeed');
   const sent=uploadedBytes(),total=Math.max(1,uploadState.total);
-  const p=Math.min(100,Math.floor(sent/total*100));
+  const p=Math.min(uploadState.batches?99:100,Math.floor(sent/total*100));
   pct.textContent=p+'%';fill.style.width=p+'%';
   const n=uploadState.files;
   name.textContent=n>1?('Sending '+Math.min(uploadState.done+uploadState.failed+1,n)+' of '+n+' · '+uploadState.current):uploadState.current;
@@ -455,10 +472,11 @@ function renderUploadUI(){
     uploadState.lastBytes=sent;uploadState.lastTime=now;
   }
   /* Never show a silent "0 B/s": say what is happening. */
-  let reconnecting=null,finishing=false;
+  let reconnecting=null,finishing=false,reading=false;
   uploadState.tasks.forEach(t=>{
     if(t.state==='reconnecting'&&(!reconnecting||t.attempt>reconnecting.attempt)) reconnecting=t;
     if(t.state==='finishing') finishing=true;
+    if(t.state==='reading') reading=true;
   });
   let quiet=0;
   uploadState.tasks.forEach(t=>{quiet=Math.max(quiet,t.quietMs||0);});
@@ -466,6 +484,8 @@ function renderUploadUI(){
   let t;
   if(reconnecting){
     t='↻ Connection dropped — resuming'+(reconnecting.attempt>1?' (try '+reconnecting.attempt+')':'')+' · tap to retry now';
+  } else if(reading&&uploadState.speed<1024){
+    t='Reading file on this device…';
   } else if(idleMs>UT.slowMs&&!finishing){
     t='Connection is slow — still trying ('+Math.round(idleMs/1000)+'s) · tap to retry now';
   } else if(finishing&&uploadState.speed<1024){
@@ -495,7 +515,9 @@ function finishUploadUI(){
   if(uploadState.batches>0) return;
   clearInterval(uploadTimer);uploadTimer=null;
   $('#uploadBar').classList.remove('stalled');
-  $('#uploadPct').textContent='100%';$('#progressFill').style.width='100%';
+  $('#uploadPct').textContent=uploadState.failed?(uploadState.failed+' failed'):'100%';
+  $('#progressFill').style.width=uploadState.failed?'0%':'100%';
+  $('#uploadSpeed').textContent=uploadState.failed?'Send failed files again':'Saved on the computer';
   setTimeout(()=>{if(uploadState.batches===0) $('#uploadBar').classList.remove('active');},800);
   Object.assign(uploadState,{total:0,doneBytes:0,files:0,done:0,failed:0,current:'',speed:0});
 }

@@ -268,11 +268,16 @@ impl App {
     }
 
     pub fn forget_upload_lock(&self, id: &str) {
+        // The map and the caller's owned guard are the two expected references.
+        // Keep the same mutex while other requests hold or wait for it; removing
+        // it would let a retry create a second mutex for the same upload.
         if let Ok(mut m) = self.upload_locks.lock() {
-            m.remove(id);
-        }
-        if let Ok(mut m) = self.upload_gens.lock() {
-            m.remove(id);
+            if m.get(id).map(|lock| Arc::strong_count(lock) == 2).unwrap_or(false) {
+                m.remove(id);
+                if let Ok(mut gens) = self.upload_gens.lock() {
+                    gens.remove(id);
+                }
+            }
         }
     }
 
