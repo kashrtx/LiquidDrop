@@ -215,3 +215,11 @@ api.on('live', (e) => console.log('connected:', e.connected));
 ```
 
 `api.on` returns an unsubscribe function. Check `if (api.on)` first if your add-on should also run on LiquidDrop 4.
+
+## Script safety rules (LiquidDrop 5)
+
+LiquidDrop 5 pages send a Content-Security-Policy. Add-on code must be loaded from your `client.js`
+(as before). Inline event handler attributes such as `onclick="..."` and `<script>` tags created with
+inline text are blocked — attach handlers with `addEventListener` instead. When you build HTML strings,
+escape values with `api.escapeHtml()`, and set attributes through the DOM (`el.dataset.x = value`,
+`el.setAttribute(...)`) rather than concatenating them into markup.

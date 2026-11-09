@@ -19,7 +19,19 @@ const HOST_SECTION: &str = r#"<div class="app-stack app-host-shell"><div class="
   <button class="stop-btn" id="stopServerBtn">⏹ Stop LiquidDrop</button>
 </div></div>"#;
 
-pub fn index(app: &App, is_host: bool) -> String {
+/// Scripts may only come from LiquidDrop itself, the page's own nonce'd
+/// inline script, or the pdf.js CDNs used as a fallback by the preview add-on.
+/// Inline event handlers (`onclick=` etc.) and injected inline scripts are blocked.
+pub fn csp(nonce: &str) -> String {
+    format!(
+        "script-src 'self' 'nonce-{}' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; \
+         worker-src 'self' blob: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; \
+         object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        nonce
+    )
+}
+
+pub fn index(app: &App, is_host: bool, nonce: &str) -> String {
     let (lock, label, detail) = if app.secure {
         let fp: String = app.fingerprint.chars().take(23).collect();
         ("🔒", "TLS Encrypted · HTTPS", format!("SHA-256: {}…", fp))
@@ -41,11 +53,12 @@ pub fn index(app: &App, is_host: bool) -> String {
         .replace("{{PIN}}", &html_escape(&app.pin))
         .replace("{{PIN_URL}}", &html_escape(&app.pin_url()))
         .replace("{{HOST_SECTION}}", if is_host { HOST_SECTION } else { "" })
+        .replace("{{NONCE}}", nonce)
         // Inserted last so nothing inside the script is ever treated as a placeholder.
         .replace("{{APP_JS}}", assets::get_str("ui/app.js"))
 }
 
-pub fn pin(error: bool, locked: bool) -> String {
+pub fn pin(error: bool, locked: bool, nonce: &str) -> String {
     let message = if locked {
         r#"<div style="color:#f472b6;font-size:13px;margin-top:12px;font-weight:600">Too many attempts. Try again in 60 seconds.</div>"#
     } else if error {
@@ -56,4 +69,5 @@ pub fn pin(error: bool, locked: bool) -> String {
     assets::get_str("ui/pin.html")
         .replace("{{ERR_CLASS}}", if error { " error" } else { "" })
         .replace("{{MESSAGE}}", message)
+        .replace("{{NONCE}}", nonce)
 }

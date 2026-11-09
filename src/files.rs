@@ -90,14 +90,16 @@ fn is_windows_reserved(stem: &str) -> bool {
 /// Make an uploaded name safe to create on this OS.
 pub fn sanitize_filename(raw: &str) -> String {
     let base = raw.rsplit(|c| c == '/' || c == '\\').next().unwrap_or("");
+    // `"` `<` `>` are dropped on every OS: Windows can't store them anyway and
+    // they are the characters that matter when names are shown in HTML.
     let mut name: String = base
         .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':' | '\0'))
+        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | ':' | '\0' | '"' | '<' | '>'))
         .collect();
     if cfg!(windows) {
         name = name
             .chars()
-            .filter(|c| !matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+            .filter(|c| !matches!(c, '|' | '?' | '*'))
             .collect();
         name = name.trim_end_matches(|c| c == '.' || c == ' ').to_string();
         let stem = name.split('.').next().unwrap_or("");
@@ -221,6 +223,11 @@ mod tests {
         assert!(sanitize_filename(".hidden").starts_with("file_"));
         assert!(sanitize_filename("").starts_with("file_"));
         assert_eq!(sanitize_filename("照片 🎉.png"), "照片 🎉.png");
+        assert_eq!(
+            sanitize_filename("clip\" onpointerenter=\"alert(1)\" x=\".mp4"),
+            "clip onpointerenter=alert(1) x=.mp4"
+        );
+        assert_eq!(sanitize_filename("<img src=x>.png"), "img src=x.png");
         assert!(sanitize_filename(&"a".repeat(400)).len() <= 200);
     }
 

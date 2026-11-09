@@ -196,11 +196,21 @@ pub async fn put_chunk(app: &Arc<App>, id: &str, query: &str, body: Incoming) ->
         written += data.len() as u64;
         app.stats.record(Kind::Upload, data.len() as u64);
     }
-    // Whatever arrived is a valid prefix of the file, so keep it either way.
-    let _ = writer.flush().await;
+    // Whatever reached the disk is a valid prefix of the file, so keep it, but
+    // report the size that is really on disk (a failed flush may have lost the
+    // tail) so the phone resumes from the right place.
+    let flushed = writer.flush().await;
     drop(writer);
-
-    let new_offset = offset + written;
+    if let Err(e) = flushed {
+        if failure.is_none() {
+            failure = Some((StatusCode::INSUFFICIENT_STORAGE, format!("Could not save the file: {}", e)));
+        }
+    }
+    let on_disk = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(offset);
+    let new_offset = on_disk.min(offset + written);
+    if failure.is_none() && new_offset != offset + written {
+        failure = Some((StatusCode::INSUFFICIENT_STORAGE, "Could not save the file.".to_string()));
+    }
     match failure {
         None => ok_json(&json!({"offset": new_offset, "size": size})),
         Some((status, msg)) => json(status, &json!({"error": msg, "offset": new_offset, "size": size})),
@@ -440,10 +450,12 @@ pub async fn receive_multipart(
         };
         let mut size = 0u64;
         let mut found = false;
+        let mut failure: Option<String> = None;
         loop {
             if let Some(i) = memchr::memmem::find(&r.buf, &sep) {
-                if let Some(w) = writer.as_mut() {
-                    w.write_all(&r.buf[..i]).await.map_err(|e| e.to_string())?;
+                if let Err(e) = write_opt(&mut writer, &r.buf[..i]).await {
+                    failure = Some(e);
+                    break;
                 }
                 size += i as u64;
                 r.buf.advance(i + sep.len());
@@ -453,8 +465,9 @@ pub async fn receive_multipart(
             let keep = sep.len();
             if r.buf.len() > keep {
                 let n = r.buf.len() - keep;
-                if let Some(w) = writer.as_mut() {
-                    w.write_all(&r.buf[..n]).await.map_err(|e| e.to_string())?;
+                if let Err(e) = write_opt(&mut writer, &r.buf[..n]).await {
+                    failure = Some(e);
+                    break;
                 }
                 size += n as u64;
                 r.buf.advance(n);
@@ -463,18 +476,25 @@ pub async fn receive_multipart(
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(e) => {
-                    drop(writer.take());
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    return Err(e);
+                    failure = Some(e);
+                    break;
                 }
             }
         }
         if let Some(mut w) = writer.take() {
-            let _ = w.flush().await;
+            // The buffer may hold the whole file: a failed flush means nothing was saved.
+            if failure.is_none() {
+                if let Err(e) = w.flush().await {
+                    failure = Some(format!("Could not save the file: {}", e));
+                }
+            }
             drop(w);
-            if !found {
+            if failure.is_none() && !found {
+                failure = Some("Upload was cut off.".to_string());
+            }
+            if let Some(e) = failure {
                 let _ = tokio::fs::remove_file(&tmp).await;
-                return Err("Upload was cut off.".to_string());
+                return Err(e);
             }
             let name = files::sanitize_filename(filename.as_deref().unwrap_or(""));
             match files::finalize(app, &tmp, target_dir, &name).await {
@@ -487,11 +507,26 @@ pub async fn receive_multipart(
                     return Err(e.to_string());
                 }
             }
-        } else if !found {
-            return Err("Upload was cut off.".to_string());
+        } else {
+            if let Some(e) = failure {
+                return Err(e);
+            }
+            if !found {
+                return Err("Upload was cut off.".to_string());
+            }
         }
     }
     Ok(saved)
+}
+
+async fn write_opt(writer: &mut Option<BufWriter<tokio::fs::File>>, data: &[u8]) -> Result<(), String> {
+    match writer.as_mut() {
+        Some(w) => w
+            .write_all(data)
+            .await
+            .map_err(|e| format!("Could not save the file: {}", e)),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

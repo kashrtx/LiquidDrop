@@ -192,6 +192,9 @@ fn pin_page_and_token_gate() {
     assert!(html.contains("host-view"), "requests from this machine get the host view");
     assert!(!html.contains("{{"), "all template placeholders filled");
     assert!(!html.contains("jszip"), "no CDN zip library");
+    let csp = page.header("content-security-policy").expect("CSP header").to_string();
+    assert!(csp.contains("script-src 'self' 'nonce-"));
+    assert!(!html.contains("<script>"), "every inline script carries the nonce");
 }
 
 #[test]

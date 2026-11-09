@@ -414,7 +414,9 @@ async function uploadFiles(files,opts){
         failed++;uploadState.failed++;
         toast(e&&e.unreadable
           ? '✗ '+file.name+' can\'t be read anymore — pick it again'
-          : '✗ '+file.name+' failed','error');
+          : (e&&e.status===507
+            ? '✗ Not enough space on the computer for '+file.name
+            : '✗ '+file.name+' failed'),'error');
       }
       uploadState.tasks.delete(task);
       uploadState.doneBytes+=file.size;
@@ -707,7 +709,8 @@ const loadedExtensionAssets=new Set();
 const extensionRuntimeState={};
 const extensionAssetToId=new Map();
 
-function escAttr(s){return esc(String(s)).replace(/'/g,'&#39;');}
+/* esc() only escapes & < >, so attributes also need both quote characters escaped. */
+function escAttr(s){return esc(String(s)).replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
 function switchAppTab(tab){
   const showExtensions=tab==='extensions';

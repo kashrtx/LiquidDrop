@@ -45,6 +45,14 @@ fn embedded(key: &str, content_type: &str, cache: &str) -> Resp {
     }
 }
 
+/// HTML page with a fresh CSP nonce.
+fn page(build: impl FnOnce(&str) -> String) -> Resp {
+    let nonce = util::random_hex(16);
+    let mut r = web::html(StatusCode::OK, build(&nonce));
+    web::set_header(&mut r, "content-security-policy", &pages::csp(&nonce));
+    r
+}
+
 fn host_only() -> Resp {
     error_page(StatusCode::FORBIDDEN, "Host only")
 }
@@ -80,7 +88,7 @@ async fn route(
 
     if first.is_empty() || !util::ct_eq(first, &app.token) {
         if is_get && (trimmed.is_empty() || trimmed == "pin") {
-            return web::html(StatusCode::OK, pages::pin(false, app.pins.is_locked(ip)));
+            return page(|n| pages::pin(false, app.pins.is_locked(ip), n));
         }
         if *method == Method::POST && trimmed == "pin" {
             return pin_post(app, req, ip).await;
@@ -109,7 +117,7 @@ async fn route(
 async fn pin_post(app: &Arc<App>, req: Request<Incoming>, ip: IpAddr) -> Resp {
     if app.pins.is_locked(ip) {
         say!("  {}🔑 PIN locked out for {}{}", RED, ip, RESET);
-        return web::html(StatusCode::OK, pages::pin(false, true));
+        return page(|n| pages::pin(false, true, n));
     }
     let declared: u64 = req
         .headers()
@@ -150,7 +158,7 @@ async fn pin_post(app: &Arc<App>, req: Request<Incoming>, ip: IpAddr) -> Resp {
         app.pins.record_fail(ip);
         let locked = app.pins.is_locked(ip);
         say!("  {}🔑 Wrong PIN attempt from {}{}", YELLOW, ip, RESET);
-        web::html(StatusCode::OK, pages::pin(true, locked))
+        page(|n| pages::pin(true, locked, n))
     }
 }
 
@@ -171,7 +179,7 @@ async fn get_route(
     _query: &str,
 ) -> Resp {
     match route_name {
-        "" | "index.html" => web::html(StatusCode::OK, pages::index(app, host)),
+        "" | "index.html" => page(|n| pages::index(app, host, n)),
         "qr.png" => web::bytes(StatusCode::OK, "image/png", app.qr_png(), "no-cache"),
         "status" => ok_json(&app.stats.snapshot()),
         "events" => events::sse(app.clone(), ip),
