@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="LiquidDrop">
+<meta name="application-name" content="LiquidDrop">
+<meta name="theme-color" content="#141935">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
+<link rel="shortcut icon" href="/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<title>LiquidDrop</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a1a;--glass:rgba(255,255,255,0.06);--glass-border:rgba(255,255,255,0.12);
+  --glass-hi:rgba(255,255,255,0.15);--accent:#6ee7b7;--accent2:#818cf8;--accent3:#f472b6;
+  --text:#f0f0f5;--text2:rgba(255,255,255,0.55);--radius:24px;
+  --safe-top:env(safe-area-inset-top,20px);--safe-bottom:env(safe-area-inset-bottom,20px);
+}
+html{height:100%;-webkit-text-size-adjust:100%}
+body{
+  min-height:100%;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',sans-serif;
+  background:var(--bg);color:var(--text);overflow-x:hidden;
+  padding:calc(var(--safe-top) + 16px) 16px calc(var(--safe-bottom) + 100px);
+  -webkit-font-smoothing:antialiased;
+}
+.app-shell{position:relative;z-index:1;display:flex;flex-direction:column;gap:16px}
+.app-stack{display:flex;flex-direction:column;gap:16px}
+.orb{position:fixed;border-radius:50%;filter:blur(80px);opacity:.35;pointer-events:none;z-index:0}
+.orb-1{width:340px;height:340px;background:radial-gradient(circle,#6ee7b7,transparent 70%);top:-80px;right:-60px;animation:f1 12s ease-in-out infinite}
+.orb-2{width:400px;height:400px;background:radial-gradient(circle,#818cf8,transparent 70%);bottom:-100px;left:-80px;animation:f2 15s ease-in-out infinite}
+.orb-3{width:250px;height:250px;background:radial-gradient(circle,#f472b6,transparent 70%);top:40%;left:50%;animation:f3 10s ease-in-out infinite}
+@keyframes f1{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-40px,30px) scale(1.1)}}
+@keyframes f2{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(30px,-40px) scale(1.15)}}
+@keyframes f3{0%,100%{transform:translate(-50%,-50%) scale(1)}50%{transform:translate(-50%,-50%) scale(1.2) translate(20px,-20px)}}
+.glass{
+  background:var(--glass);backdrop-filter:blur(40px) saturate(1.6);-webkit-backdrop-filter:blur(40px) saturate(1.6);
+  border:1px solid var(--glass-border);border-radius:var(--radius);position:relative;z-index:1;
+  box-shadow:0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.08);
+}
+.glass::before{content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,transparent 50%);pointer-events:none}
+.header{text-align:center;padding:24px 20px 20px}
+.logo{font-size:42px;margin-bottom:4px;display:block;filter:drop-shadow(0 0 20px rgba(110,231,183,0.4))}
+.header h1{font-size:28px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2),var(--accent3));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;letter-spacing:-0.5px}
+.header p{color:var(--text2);font-size:13px;margin-top:6px;font-weight:500}
+.device-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(110,231,183,0.1);border:1px solid rgba(110,231,183,0.2);border-radius:100px;padding:5px 14px;font-size:12px;color:var(--accent);margin-top:12px;font-weight:600}
+.device-badge .dot{width:7px;height:7px;background:var(--accent);border-radius:50%;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.security-badge{display:flex;align-items:center;gap:10px;padding:14px 18px;font-size:12px}
+.security-badge .lock{font-size:20px}
+.security-info{flex:1;min-width:0}
+.security-info strong{display:block;font-size:13px;color:var(--accent);margin-bottom:2px}
+.security-info span{color:var(--text2);font-size:11px;word-break:break-all;font-family:'SF Mono',ui-monospace,monospace}
+
+.app-tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:8px}
+.tab-btn{border:none;border-radius:16px;background:rgba(255,255,255,0.05);color:var(--text2);font-size:14px;font-weight:800;padding:12px 14px;cursor:pointer;font-family:inherit;transition:all .2s ease}
+.tab-btn:hover{background:rgba(255,255,255,0.08);color:var(--text)}
+.tab-btn.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0a0a1a;box-shadow:0 0 22px rgba(110,231,183,0.22)}
+.tab-hidden{display:none!important}
+.extensions-panel{padding:18px;display:flex;flex-direction:column;gap:14px}
+.extensions-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.extensions-title{min-width:0}
+.extensions-title h2{font-size:20px;font-weight:800;letter-spacing:-0.25px;margin-top:4px}
+.extensions-title p{font-size:12px;color:var(--text2);line-height:1.45;margin-top:6px}
+.extension-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.ext-btn{border:none;border-radius:14px;padding:10px 12px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;transition:all .2s ease;background:rgba(255,255,255,0.08);color:var(--text);border:1px solid var(--glass-border)}
+.ext-btn:hover{background:rgba(255,255,255,0.12);transform:translateY(-1px)}
+.ext-btn:active{transform:scale(0.97)}
+.ext-btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0a0a1a;border:none}
+.ext-btn.danger{background:rgba(255,80,80,0.1);color:rgba(255,130,130,0.96);border-color:rgba(255,80,80,0.22)}
+.ext-btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.extension-list{display:grid;grid-template-columns:1fr;gap:12px}
+.extension-card{padding:16px;border-radius:18px;background:rgba(255,255,255,0.045);border:1px solid var(--glass-border);display:flex;flex-direction:column;gap:12px;min-width:0;overflow:hidden}
+.extension-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.extension-card h3{font-size:16px;font-weight:800;letter-spacing:-0.1px}
+.extension-card p{font-size:12px;color:var(--text2);line-height:1.45;margin-top:4px}
+.extension-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.extension-badge{display:inline-flex;align-items:center;padding:5px 8px;border-radius:999px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);color:var(--text2);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.55px}
+.extension-badge.on{background:rgba(110,231,183,0.1);border-color:rgba(110,231,183,0.22);color:var(--accent)}
+.extension-badge.off{background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.42)}
+.extension-badge.warn{background:rgba(251,191,36,0.12);border-color:rgba(251,191,36,0.24);color:#fbbf24}
+.extension-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
+.extension-empty{padding:26px 16px;text-align:center;color:var(--text2);font-size:13px;border:1px dashed var(--glass-border);border-radius:18px}
+.extension-note{font-size:11px;color:var(--text2);line-height:1.5;padding:12px 14px;border-radius:16px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.16)}
+.extension-submeta{font-size:11px;color:var(--text2);line-height:1.45;display:flex;flex-wrap:wrap;gap:6px;margin-top:-4px}.extension-diagnostics{font-size:11px;line-height:1.45;padding:10px 12px;border-radius:14px;background:rgba(110,231,183,0.07);border:1px solid rgba(110,231,183,0.14);color:rgba(255,255,255,0.76)}.extension-diagnostics.error{background:rgba(248,113,113,0.1);border-color:rgba(248,113,113,0.22);color:rgba(255,205,205,0.94)}
+.extension-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.62);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);z-index:980;display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;pointer-events:none;transition:opacity .3s ease}
+.extension-modal-overlay.show{opacity:1;pointer-events:auto}
+.extension-modal{max-width:480px;width:100%;max-height:min(86vh,720px);overflow:auto;padding:22px;text-align:left;transform:scale(0.94) translateY(10px);transition:transform .3s ease}
+.extension-modal-overlay.show .extension-modal{transform:scale(1) translateY(0)}
+.extension-modal h3{font-size:20px;font-weight:800;margin-bottom:6px}
+.extension-modal p{font-size:12px;color:var(--text2);line-height:1.45;margin-bottom:14px}
+.extension-form{display:flex;flex-direction:column;gap:14px}
+.extension-field{display:flex;flex-direction:column;gap:7px}
+.extension-field label{font-size:12px;font-weight:800;color:var(--text)}
+.extension-field small{font-size:11px;color:var(--text2);line-height:1.4}
+.extension-field input,.extension-field textarea,.extension-field select{width:100%;border:1px solid var(--glass-border);border-radius:14px;background:rgba(255,255,255,0.06);color:var(--text);font:inherit;font-size:13px;padding:11px 12px;outline:none;color-scheme:dark;transition:border-color .2s ease,box-shadow .2s ease,background .2s ease}
+.extension-field input:focus,.extension-field textarea:focus,.extension-field select:focus{border-color:rgba(110,231,183,0.44);background:rgba(255,255,255,0.085);box-shadow:0 0 0 3px rgba(110,231,183,0.12)}
+.extension-field select{appearance:auto;background-color:#171827;color:#f7f7fb}
+.extension-field select option{background:#111224;color:#f7f7fb}
+.extension-field select option:checked{background:#2563eb;color:#fff}
+.extension-field select option:hover{background:#1f3f7a;color:#fff}
+.extension-field textarea{min-height:92px;resize:vertical}
+.extension-check{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:800;color:var(--text)}
+.extension-check input{width:20px;height:20px;accent-color:#6ee7b7}
+.extension-modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px;flex-wrap:wrap}
+.extension-input-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}
+.extension-input-row input,.extension-input-row textarea{min-width:0}
+@media(min-width:760px){.extension-list{grid-template-columns:repeat(2,minmax(0,1fr))}.extension-card{min-height:178px}.extension-actions{margin-top:auto}}
+.host-panel{padding:18px}
+.host-panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.host-eyebrow,.files-eyebrow{font-size:12px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:var(--accent)}
+.host-panel h2{font-size:18px;font-weight:700;letter-spacing:-0.25px;margin-top:4px}
+.host-panel p{font-size:12px;color:var(--text2);line-height:1.45;margin-top:6px}
+.host-status,.files-status{flex-shrink:0;padding:8px 12px;border-radius:999px;border:1px solid rgba(110,231,183,0.2);background:rgba(110,231,183,0.08);color:var(--accent);font-size:11px;font-weight:700;letter-spacing:.7px;text-transform:uppercase}
+.stop-btn{width:100%;margin-top:16px;padding:15px 18px;border:none;border-radius:18px;background:linear-gradient(135deg,#fb7185,#ef4444);color:#fff;font-size:15px;font-weight:800;cursor:pointer;transition:all .2s ease;font-family:inherit}
+.stop-btn:hover{transform:translateY(-1px);box-shadow:0 0 24px rgba(239,68,68,0.35)}
+.stop-btn:active{transform:scale(0.98)}
+.stop-btn:disabled{opacity:.7;cursor:wait;transform:none;box-shadow:none}
+.qr-section{padding:22px;text-align:center}
+.qr-section h2{font-size:15px;font-weight:600;margin-bottom:14px;color:var(--text2)}
+.qr-wrap{display:inline-block;padding:14px;background:#fff;border-radius:18px;box-shadow:0 4px 24px rgba(0,0,0,0.25)}
+.qr-wrap img{display:block;width:180px;height:180px}
+.qr-url{margin-top:14px;font-size:11px;color:var(--text2);word-break:break-all;font-family:'SF Mono',ui-monospace,monospace;background:rgba(255,255,255,0.04);padding:8px 14px;border-radius:12px;cursor:pointer;transition:background .2s}
+.qr-url:hover{background:rgba(255,255,255,0.08)}
+.dropzone{padding:38px 20px;text-align:center;cursor:pointer;transition:all .3s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden}
+.dropzone:hover,.dropzone.drag-over{background:rgba(110,231,183,0.08);border-color:rgba(110,231,183,0.3);transform:scale(1.01)}
+.dropzone.drag-over .drop-icon{transform:scale(1.15);filter:drop-shadow(0 0 30px rgba(110,231,183,0.6))}
+.drop-icon{font-size:52px;display:block;margin-bottom:12px;transition:all .3s ease}
+.dropzone h2{font-size:18px;font-weight:600;margin-bottom:6px}
+.dropzone p{color:var(--text2);font-size:13px}
+.dropzone input{display:none}
+.upload-bar{max-height:0;padding:0 20px;opacity:0;transform:translateY(-10px);transition:max-height .35s ease,padding .35s ease,opacity .35s ease,transform .35s ease;pointer-events:none;overflow:hidden}
+.upload-bar.active{max-height:120px;padding:16px 20px;opacity:1;transform:translateY(0);pointer-events:auto}
+.upload-info{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.upload-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:55%}
+.upload-speed{font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums}
+.upload-pct{font-size:13px;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
+.progress-track{height:6px;border-radius:3px;background:rgba(255,255,255,0.06);overflow:hidden}
+.progress-fill{height:100%;border-radius:3px;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .15s linear;box-shadow:0 0 16px rgba(110,231,183,0.3)}
+.files-panel.glass{background:var(--glass);backdrop-filter:blur(40px) saturate(1.6);-webkit-backdrop-filter:blur(40px) saturate(1.6);border:1px solid var(--glass-border);box-shadow:0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.08);padding:14px;overflow:hidden}
+.files-panel.glass::before{display:block}
+.files-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 2px 10px;min-width:0}
+.files-heading{display:flex;align-items:center;gap:10px;min-width:0}
+.file-list-wrap{min-height:72px}
+.file-list{display:flex;flex-direction:column;gap:10px;min-width:0}
+.file-card{padding:14px;display:flex;align-items:center;gap:12px;cursor:default;transition:all .25s ease;text-decoration:none;color:inherit;min-width:0;overflow:hidden}
+.file-card:active{transform:scale(0.985)}
+.file-preview{width:54px;height:54px;border-radius:16px;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;background:linear-gradient(135deg,rgba(110,231,183,0.15),rgba(129,140,248,0.18));border:1px solid rgba(255,255,255,0.08);position:relative}
+.file-preview img,.file-preview video{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit;background:rgba(255,255,255,0.04)}
+.file-preview.placeholder{font-size:22px;color:var(--text2)}
+.file-preview.img-type{background:linear-gradient(135deg,rgba(244,114,182,0.2),rgba(251,146,60,0.15))}
+.file-preview.vid-type{background:linear-gradient(135deg,rgba(129,140,248,0.2),rgba(244,114,182,0.15))}
+.file-preview.vid-type::after{content:'▶';position:absolute;right:6px;bottom:6px;width:18px;height:18px;border-radius:999px;background:rgba(10,10,26,0.66);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.file-preview.doc-type{background:linear-gradient(135deg,rgba(56,189,248,0.2),rgba(110,231,183,0.15))}
+.file-preview.audio-type{background:linear-gradient(135deg,rgba(251,191,36,0.72),rgba(244,114,182,0.58));color:#fff;font-size:28px;text-shadow:0 2px 16px rgba(255,255,255,0.34),0 8px 22px rgba(124,58,237,0.44);isolation:isolate}
+.file-preview.audio-type::before{content:'';position:absolute;inset:7px;border-radius:14px;background:rgba(255,255,255,0.24);border:1px solid rgba(255,255,255,0.24);box-shadow:inset 0 1px 0 rgba(255,255,255,0.22),0 0 18px rgba(251,191,36,0.18);z-index:0}
+.file-preview.audio-type span{position:relative;z-index:1;display:block;transform:translateY(1px);filter:brightness(1.28) saturate(1.2)}
+.file-preview.code-type{background:linear-gradient(135deg,rgba(96,165,250,0.22),rgba(129,140,248,0.16));font-size:16px;font-weight:800;font-family:'SF Mono',ui-monospace,monospace;letter-spacing:-0.4px}
+.file-meta{flex:1;min-width:0}
+.file-name{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-detail{font-size:12px;color:var(--text2);margin-top:2px}
+.file-dl{width:40px;height:40px;font-size:15px;flex-shrink:0;transition:all .2s;padding:0;border-radius:14px;background:rgba(110,231,183,0.08);color:var(--accent);text-decoration:none;display:flex;align-items:center;justify-content:center;line-height:1}
+.file-dl:hover{background:rgba(110,231,183,0.18);color:var(--accent)}
+.file-delete{width:40px;height:40px;font-size:15px;flex-shrink:0;padding:0;cursor:pointer;transition:all .2s;border:none;background:rgba(255,80,80,0.08);color:rgba(255,100,100,0.8);border-radius:14px;display:flex;align-items:center;justify-content:center;line-height:1}
+.file-delete:hover{background:rgba(255,80,80,0.18);color:rgba(255,100,100,1)}
+.file-delete:active{transform:scale(0.92)}
+.empty-state{text-align:center;padding:40px 20px;color:var(--text2);font-size:14px}
+.empty-state span{font-size:36px;display:block;margin-bottom:10px;opacity:.5}
+.toast{position:fixed;bottom:calc(var(--safe-bottom) + 24px);left:50%;transform:translateX(-50%) translateY(80px);background:rgba(20,20,35,0.92);backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:16px;padding:12px 22px;font-size:14px;font-weight:600;z-index:999;opacity:0;transition:all .4s cubic-bezier(.4,0,.2,1);pointer-events:none;box-shadow:0 12px 40px rgba(0,0,0,0.4);white-space:nowrap}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.success{border-color:rgba(110,231,183,0.3);color:var(--accent)}
+.toast.error{border-color:rgba(244,114,182,0.3);color:var(--accent3)}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);z-index:900;display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;pointer-events:none;transition:opacity .3s ease}
+.modal-overlay.show{opacity:1;pointer-events:auto}
+.modal{background:rgba(20,20,40,0.95);border:1px solid var(--glass-border);border-radius:24px;padding:28px 24px;max-width:340px;width:100%;text-align:center;transform:scale(0.92) translateY(10px);transition:transform .35s cubic-bezier(.4,0,.2,1);box-shadow:0 24px 64px rgba(0,0,0,0.5)}
+.modal-overlay.show .modal{transform:scale(1) translateY(0)}
+.modal-icon{font-size:40px;margin-bottom:10px}
+.modal h3{font-size:18px;font-weight:700;margin-bottom:6px}
+.modal p{font-size:13px;color:var(--text2);margin-bottom:20px;line-height:1.5}
+.modal-count{color:var(--accent);font-weight:700}
+.modal-buttons{display:flex;gap:10px}
+.modal-btn{flex:1;padding:14px 8px;border:none;border-radius:16px;font-size:14px;font-weight:700;cursor:pointer;transition:all .2s ease;font-family:inherit}
+.modal-btn:active{transform:scale(0.96)}
+.btn-zip{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0a0a1a}
+.btn-zip:hover{box-shadow:0 0 24px rgba(110,231,183,0.3)}
+.btn-separate{background:rgba(255,255,255,0.08);color:var(--text);border:1px solid var(--glass-border)}
+.btn-separate:hover{background:rgba(255,255,255,0.12)}
+
+/* ── Custom checkbox — fully suppress native rendering ── */
+.file-checkbox{
+  width:20px;height:20px;border-radius:6px;border:2px solid var(--glass-border);
+  background-color:rgba(255,255,255,0.04);background-image:none;
+  appearance:none;-webkit-appearance:none;-moz-appearance:none;
+  cursor:pointer;flex-shrink:0;transition:all .2s;position:relative;
+  margin:0;padding:0;
+  /* Kill any text/glyph the browser might render inside the checkbox */
+  color:transparent !important;font-size:0 !important;line-height:0 !important;
+  text-indent:-9999px;overflow:hidden;
+  -webkit-font-smoothing:none;
+}
+.file-checkbox::before,.file-checkbox::after{display:none !important;content:none !important}
+.file-checkbox::-ms-check{display:none}
+.file-checkbox:checked{
+  background-color:transparent;
+  border-color:transparent;
+  /* Gradient fill + checkmark as a single SVG — no url(#id) refs for cross-browser safety */
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 20 20' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='20' height='20' rx='6' fill='%236ee7b7'/%3E%3Cpath d='M6 10l3 3 5-6' stroke='%230a0a1a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:center;background-size:100% 100%;
+}
+.file-checkbox:checked::before,.file-checkbox:checked::after{display:none !important;content:none !important}
+
+.batch-toolbar{display:none;flex-direction:column;align-items:stretch;gap:12px;padding:14px;margin:0 0 10px;overflow:hidden;border-radius:18px;min-width:0;background:rgba(255,255,255,0.045);border:1px solid var(--glass-border)}
+.batch-toolbar.show{display:flex}
+.batch-row{display:flex;align-items:center;gap:12px}
+.batch-main{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+.batch-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.batch-info{font-size:13px;font-weight:600;color:var(--text2);white-space:nowrap}
+.batch-info strong{color:var(--accent)}
+.batch-btn{flex:1;min-height:48px;padding:12px 14px;border:none;border-radius:16px;font-size:14px;font-weight:700;cursor:pointer;transition:all .2s;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:6px;min-width:0;white-space:nowrap}
+.batch-btn:active{transform:scale(0.96)}
+.batch-btn.del{background:rgba(255,80,80,0.12);color:rgba(255,120,120,0.9);border:1px solid rgba(255,80,80,0.2)}
+.batch-btn.del:hover{background:rgba(255,80,80,0.2)}
+.batch-btn.dl{background:rgba(110,231,183,0.1);color:var(--accent);border:1px solid rgba(110,231,183,0.2)}
+.batch-btn.dl:hover{background:rgba(110,231,183,0.18)}
+.select-all-wrap{display:flex;align-items:center;gap:10px;cursor:pointer;font-size:15px;color:var(--text);font-weight:700;padding:2px 0;user-select:none;-webkit-user-select:none;min-width:0;white-space:nowrap}
+.select-all-wrap:hover{color:var(--text)}
+.confirm-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);z-index:950;display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;pointer-events:none;transition:opacity .3s ease}
+.confirm-overlay.show{opacity:1;pointer-events:auto}
+.confirm-box{background:rgba(20,20,40,0.95);border:1px solid var(--glass-border);border-radius:24px;padding:28px 24px;max-width:360px;width:100%;text-align:center;transform:scale(0.92) translateY(10px);transition:transform .35s cubic-bezier(.4,0,.2,1);box-shadow:0 24px 64px rgba(0,0,0,0.5)}
+.confirm-overlay.show .confirm-box{transform:scale(1) translateY(0)}
+.confirm-icon{font-size:40px;margin-bottom:10px}
+.confirm-box h3{font-size:18px;font-weight:700;margin-bottom:6px}
+.confirm-box p{font-size:13px;color:var(--text2);margin-bottom:20px;line-height:1.5}
+.confirm-box p strong{color:var(--text)}
+.confirm-buttons{display:flex;gap:10px}
+.confirm-btn{flex:1;padding:14px 8px;border:none;border-radius:16px;font-size:14px;font-weight:700;cursor:pointer;transition:all .2s ease;font-family:inherit}
+.confirm-btn:active{transform:scale(0.96)}
+.confirm-btn.cancel{background:rgba(255,255,255,0.08);color:var(--text);border:1px solid var(--glass-border)}
+.confirm-btn.cancel:hover{background:rgba(255,255,255,0.12)}
+.confirm-btn.danger{background:linear-gradient(135deg,#f87171,#ef4444);color:#fff}
+.confirm-btn.danger:hover{box-shadow:0 0 24px rgba(248,113,113,0.3)}
+.confirm-btn.action{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0a0a1a}
+.confirm-btn.action:hover{box-shadow:0 0 24px rgba(110,231,183,0.3)}
+.shutdown-screen{position:fixed;inset:0;z-index:1200;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(circle at top,rgba(110,231,183,0.12),transparent 38%),radial-gradient(circle at bottom,rgba(129,140,248,0.16),transparent 42%),rgba(8,8,22,0.94);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);opacity:0;pointer-events:none;transition:opacity .45s ease}
+.shutdown-screen.show{opacity:1;pointer-events:auto}
+.shutdown-card{max-width:520px;width:100%;padding:34px 30px 30px;text-align:center}
+.shutdown-icon{font-size:54px;display:block;margin-bottom:10px;filter:drop-shadow(0 0 22px rgba(110,231,183,0.28))}
+.shutdown-card h2{font-size:32px;font-weight:800;letter-spacing:-0.7px;margin-bottom:10px;background:linear-gradient(135deg,#f0fdf4,#93c5fd,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.shutdown-card p{font-size:15px;line-height:1.7;color:var(--text2);margin-bottom:12px}
+.shutdown-note{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:999px;background:rgba(110,231,183,0.08);border:1px solid rgba(110,231,183,0.18);color:var(--accent);font-size:13px;font-weight:700;margin-top:6px}
+@media(min-width:600px){body{padding:40px 20px 120px}.dropzone{padding:56px 20px}}
+@media(min-width:980px){
+  body{padding:24px 28px 32px}
+  .app-shell{max-width:1360px;margin:0 auto;display:grid;grid-template-columns:minmax(0,1.38fr) minmax(360px,.84fr);gap:18px 28px;align-items:start}
+  body.host-view .app-shell{
+    grid-template-areas:
+      "intro qr"
+      "host qr"
+      "upload upload"
+      "files files";
+  }
+  body:not(.host-view) .app-shell{
+    grid-template-areas:
+      "intro qr"
+      "upload upload"
+      "files files";
+  }
+  .app-intro{grid-area:intro}
+  .app-upload-shell{grid-area:upload}
+  .app-host-shell{grid-area:host}
+  .app-qr-shell{grid-area:qr}
+  .app-files-shell{grid-area:files}
+  .app-extensions-shell{grid-area:files}
+  .app-header{text-align:left;padding:28px 30px 26px;min-height:206px;display:flex;flex-direction:column;justify-content:center}
+  .app-security,.app-host,.app-upload,.app-qr,.app-files{margin-bottom:0}
+  .app-upload-shell{display:flex;flex-direction:column;gap:0}
+  .app-drop{min-height:184px;display:flex;flex-direction:column;justify-content:center;padding:32px 30px}
+  .app-upload-shell .upload-bar{margin-top:0}
+  .app-upload-shell .upload-bar.active{margin-top:12px}
+  .app-qr-shell{display:flex;align-self:stretch}
+  .app-qr{position:relative;z-index:2;display:flex;flex-direction:column;justify-content:center;width:100%;height:100%}
+  .app-qr .qr-wrap{display:flex;align-items:center;justify-content:center;align-self:center}
+  .app-qr .qr-wrap img{margin:0 auto}
+  .app-files{overflow:hidden}
+  .files-panel.glass{
+    background:var(--glass);backdrop-filter:blur(40px) saturate(1.6);-webkit-backdrop-filter:blur(40px) saturate(1.6);
+    border:1px solid var(--glass-border);border-radius:var(--radius);position:relative;z-index:1;
+    box-shadow:0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.08);
+    padding:18px 18px 16px;display:flex;flex-direction:column;width:100%
+  }
+  .files-panel.glass::before{display:block;content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,transparent 50%);pointer-events:none}
+  .files-panel-head{padding:0 8px 8px}
+  .file-list-wrap{min-height:0;max-height:min(52vh,620px);overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding-right:6px;scrollbar-gutter:stable}
+  .file-list{height:auto;overflow:visible;padding-right:0}
+  .batch-toolbar{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:16px;padding:12px 14px}
+  .batch-toolbar.show{display:grid}
+  .batch-row{min-width:0}
+  .batch-main{gap:12px}
+  .batch-actions{display:flex;gap:10px;min-width:0}
+  .batch-btn{min-width:140px;padding:11px 14px;font-size:13px}
+  .header h1{font-size:38px}
+  .header p{font-size:15px}
+  .device-badge{margin-top:14px}
+  .qr-section{padding:28px}
+  .qr-wrap img{width:210px;height:210px}
+  .dropzone h2{font-size:24px}
+  .dropzone p{font-size:15px}
+  .host-panel h2{font-size:19px}
+}
+.fade-in{animation:fadeIn .5s ease both}
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+.file-card{animation:slideIn .35s ease both}
+@keyframes slideIn{from{opacity:0;transform:translateX(-16px)}to{opacity:1;transform:none}}
+.file-list::-webkit-scrollbar,.file-list-wrap::-webkit-scrollbar{width:8px;background:transparent}
+.file-list::-webkit-scrollbar-thumb,.file-list-wrap::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border-radius:999px}
+</style>
+<style>
+{{APP_CSS}}
+</style>
+</head>
+<body class="{{BODY_CLASS}}">
+<div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div>
+
+<div class="app-shell">
+<div class="app-stack app-intro">
+<div class="header glass fade-in app-header">
+  <span class="logo">💧</span>
+  <h1>LiquidDrop</h1>
+  <p>Tap to send · Tap to receive</p>
+  <div class="device-badge"><span class="dot"></span> Connected on local network</div>
+</div>
+
+<div class="security-badge glass fade-in app-security" style="animation-delay:.03s">
+  <span class="lock">{{LOCK_ICON}}</span>
+  <div class="security-info">
+    <strong>{{SEC_LABEL}}</strong>
+    <span>{{SEC_DETAIL}}</span>
+  </div>
+</div>
+
+<div class="app-tabs glass fade-in" id="appTabs" style="animation-delay:.06s">
+  <button class="tab-btn active" type="button" data-tab="files">Files</button>
+  <button class="tab-btn" type="button" data-tab="extensions">Extensions</button>
+</div>
+</div>
+
+<div class="app-stack app-qr-shell">
+<div class="qr-section glass fade-in app-qr" id="qrSection" style="animation-delay:.05s">
+  <h2>📱 Scan to open on another device</h2>
+  <div class="qr-wrap"><img src="/{{TOKEN}}/qr.png" alt="QR Code" id="qrImage"></div>
+  <div class="qr-url" id="urlCopy" title="Tap to copy">{{BASE_URL}}</div>
+  <div style="margin-top:16px;padding:12px 18px;background:rgba(129,140,248,0.08);border:1px solid rgba(129,140,248,0.2);border-radius:16px">
+    <div style="font-size:12px;color:var(--text2);margin-bottom:6px;font-weight:600">🔑 Or share this PIN code</div>
+    <div style="font-size:32px;font-weight:800;letter-spacing:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-family:'SF Mono',ui-monospace,monospace">{{PIN}}</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:4px">Enter at <span id="pinUrl" style="font-family:'SF Mono',ui-monospace,monospace">{{PIN_URL}}</span></div>
+  </div>
+</div>
+</div>
+
+{{HOST_SECTION}}
+
+<div class="app-stack app-upload-shell" id="filesTabUpload">
+<div class="dropzone glass fade-in app-drop" id="dropzone" style="animation-delay:.1s">
+  <span class="drop-icon">⬆️</span>
+  <h2>Send Files</h2>
+  <p>Tap here or drag & drop anything</p>
+  <input type="file" id="fileInput" multiple>
+</div>
+
+<div class="upload-bar glass app-upload" id="uploadBar">
+  <div class="upload-info">
+    <div style="display:flex;flex-direction:column;min-width:0;flex:1">
+      <span class="upload-name" id="uploadName">file.zip</span>
+      <span class="upload-speed" id="uploadSpeed"></span>
+    </div>
+    <span class="upload-pct" id="uploadPct">0%</span>
+  </div>
+  <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+</div>
+</div>
+
+<div class="app-stack app-files-shell" id="filesTabList">
+<div class="files-panel glass fade-in app-files" style="animation-delay:.12s">
+  <div class="files-panel-head">
+    <div class="files-heading">
+      <div class="files-eyebrow">📁 Shared Files</div>
+    </div>
+    <div class="files-status">Live</div>
+  </div>
+  <div class="batch-toolbar" id="batchToolbar">
+    <div class="batch-row">
+      <div class="batch-main">
+        <label class="select-all-wrap"><input type="checkbox" class="file-checkbox" id="selectAll"> Select All</label>
+        <div class="batch-info"><strong id="selectedCount">0</strong> selected</div>
+      </div>
+    </div>
+    <div class="batch-actions">
+      <button class="batch-btn dl" id="batchDownloadBtn">↓ Download</button>
+      <button class="batch-btn del" id="batchDeleteBtn">✕ Delete</button>
+    </div>
+  </div>
+  <div class="file-list-wrap">
+    <div class="file-list" id="fileList"></div>
+  </div>
+</div>
+</div>
+
+<div class="app-stack app-extensions-shell tab-hidden" id="extensionsTabPanel">
+<div class="extensions-panel glass fade-in app-extensions" style="animation-delay:.12s">
+  <div class="extensions-head">
+    <div class="extensions-title">
+      <div class="host-eyebrow">Extensions</div>
+      <h2>Manage LiquidDrop add-ons</h2>
+      <p>Install trusted extensions, toggle them on or off, and configure settings that apply across devices.</p>
+    </div>
+    <div class="extension-toolbar">
+      <button class="ext-btn" id="refreshExtensionsBtn" type="button">Refresh</button>
+      <button class="ext-btn" id="openExtensionsFolderBtn" type="button">Open Folder</button>
+      <button class="ext-btn" id="createExtensionBtn" type="button">Create Add-on</button>
+      <button class="ext-btn primary" id="installExtensionBtn" type="button">Install JSON</button>
+      <input type="file" id="extensionFileInput" accept=".json,.liquiddrop-extension,application/json" hidden>
+    </div>
+  </div>
+  <div class="extension-note" id="extensionTrustNote">Extensions can run JavaScript in LiquidDrop. Install only code you trust.</div>
+  <div class="extension-list" id="extensionList"></div>
+</div>
+</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<div class="modal-overlay" id="zipModal">
+  <div class="modal">
+    <div class="modal-icon">📦</div>
+    <h3>Zip them up?</h3>
+    <p>You're sending <span class="modal-count" id="modalCount">5</span> files. Want to bundle them into one clean zip?</p>
+    <div class="modal-buttons">
+      <button class="modal-btn btn-zip" id="btnZip">Zip & Send</button>
+      <button class="modal-btn btn-separate" id="btnSeparate">Send separately</button>
+    </div>
+  </div>
+</div>
+
+<div class="confirm-overlay" id="confirmOverlay">
+  <div class="confirm-box">
+    <div class="confirm-icon" id="confirmIcon">⚠️</div>
+    <h3 id="confirmTitle">Confirm</h3>
+    <p id="confirmMessage">Are you sure?</p>
+    <div class="confirm-buttons">
+      <button class="confirm-btn cancel" id="confirmCancel">Cancel</button>
+      <button class="confirm-btn danger" id="confirmOk">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="extension-modal-overlay" id="extensionConfigOverlay">
+  <div class="extension-modal glass">
+    <h3 id="extensionConfigTitle">Configure Extension</h3>
+    <p id="extensionConfigDescription">Adjust extension settings.</p>
+    <form class="extension-form" id="extensionConfigForm"></form>
+    <div class="extension-modal-actions">
+      <button class="ext-btn danger" id="extensionConfigReset" type="button">Reset Defaults</button>
+      <button class="ext-btn" id="extensionConfigCancel" type="button">Cancel</button>
+      <button class="ext-btn primary" id="extensionConfigSave" type="button">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<div class="extension-modal-overlay" id="extensionCreateOverlay">
+  <div class="extension-modal glass">
+    <h3>Create Add-on</h3>
+    <p>Generate a safe starter folder with a manifest, settings, and cross-device shared state.</p>
+    <form class="extension-form" id="extensionCreateForm">
+      <div class="extension-field"><label>Name</label><input type="text" name="name" id="extensionCreateName" value="My LiquidDrop Add-on" maxlength="80"></div>
+      <div class="extension-field"><label>ID</label><input type="text" name="id" id="extensionCreateId" value="community.my-addon" maxlength="64"><small>Lowercase letters, numbers, dots, dashes, and underscores.</small></div>
+      <div class="extension-field"><label>Creator</label><input type="text" name="author" id="extensionCreateAuthor" value="" maxlength="80"></div>
+      <div class="extension-field"><label>Description</label><textarea name="description" id="extensionCreateDescription">A community add-on created with the LiquidDrop starter.</textarea></div>
+    </form>
+    <div class="extension-modal-actions">
+      <button class="ext-btn" id="extensionCreateCancel" type="button">Cancel</button>
+      <button class="ext-btn primary" id="extensionCreateSave" type="button">Create Starter</button>
+    </div>
+  </div>
+</div>
+
+<div class="shutdown-screen" id="shutdownScreen">
+  <div class="shutdown-card glass">
+    <span class="shutdown-icon">💚</span>
+    <h2>LiquidDrop has safely shut down</h2>
+    <p>Everything is wrapped up. Thanks for sharing a little moment of convenience with someone.</p>
+    <p>You can close this tab now. If you started LiquidDrop from the Windows launcher, the command window should close automatically too.</p>
+    <div class="shutdown-note">✓ Session ended successfully</div>
+  </div>
+</div>
+
+<script>
+{{APP_JS}}
+</script>
+</body>
+</html>

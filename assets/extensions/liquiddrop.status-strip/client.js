@@ -183,6 +183,14 @@
       publishSharedWeather({status:'error',at:Date.now(),value:'Unavailable',unit:settings.temperatureUnit});
     }
   }
+  function renderStatus(s){
+    ensure();
+    if(strip&&settings.accentColor) strip.style.setProperty('--ld-status-accent',settings.accentColor);
+    const devices=Math.max(1,s.active_devices||1);
+    setChip('devices','devices','Devices',devices+' active',!!settings.showDevices,false);
+    const up=s.upload_bps||0,down=s.download_bps||0,active=up>256||down>256;
+    setChip('speed','speed','Transfer','\u2191 '+fmtSpeed(up)+'  \u2193 '+fmtSpeed(down),!!settings.showTransfer,active);
+  }
   async function updateStatus(){
     ensure();
     if(strip&&settings.accentColor) strip.style.setProperty('--ld-status-accent',settings.accentColor);
@@ -205,7 +213,19 @@
     ensure();
     updateStatus();
     updateWeather(true);
-    setInterval(updateStatus,2000);
+    if(api.on){
+      // LiquidDrop 5 pushes status every 2s over the live connection; poll only as a fallback.
+      api.on('status',s=>{if(s) renderStatus(s);});
+      api.on('settings',async e=>{
+        if(e&&e.id!==id) return;
+        const fresh=await api.getSettings(id).catch(()=>null);
+        if(fresh){settings=Object.assign(settings,fresh);updateStatus();updateWeather(true);}
+      });
+      if(!api.isLive||!api.isLive()) updateStatus();
+      setInterval(()=>{if(api.isLive&&!api.isLive()) updateStatus();},5000);
+    } else {
+      setInterval(updateStatus,2000);
+    }
     setInterval(()=>updateWeather(false),60000);
     window.addEventListener('focus',()=>{updateStatus();updateWeather(false);});
     document.addEventListener('visibilitychange',()=>{if(!document.hidden){updateStatus();updateWeather(false);}});

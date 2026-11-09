@@ -14,6 +14,11 @@
   ]);
   const documentNames = new Set(['dockerfile', 'makefile', 'license', 'readme', '.env']);
   const pdfSources = [
+    // Bundled copy served by LiquidDrop itself (works offline / on hotspots).
+    {
+      script: api.apiBase + '/vendor/pdfjs/pdf.min.js',
+      worker: api.apiBase + '/vendor/pdfjs/pdf.worker.min.js'
+    },
     {
       script: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
       worker: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'

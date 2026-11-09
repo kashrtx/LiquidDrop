@@ -1,0 +1,120 @@
+name: Release
+# Push a tag like v5.0.0 to build one-click downloads for every OS.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag must match the version in Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          CARGO=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          TAG="${GITHUB_REF_NAME#v}"
+          case "$TAG" in
+            "$CARGO"|"$CARGO"-*) echo "Releasing $TAG (Cargo.toml $CARGO)";;
+            *) echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO. Update Cargo.toml or use tag v$CARGO."; exit 1;;
+          esac
+
+  build:
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: LiquidDrop-windows-x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            name: LiquidDrop-linux-x64
+          - os: macos-latest
+            target: universal
+            name: LiquidDrop-macos-universal
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target == 'universal' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Bundle pdf.js (offline PDF preview)
+        shell: bash
+        run: bash scripts/fetch-vendor.sh
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        if: matrix.target != 'universal'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $dir = "dist/${{ matrix.name }}"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/liquiddrop.exe" "$dir/LiquidDrop.exe"
+          Copy-Item README.md, LICENSE $dir
+          Compress-Archive -Path "$dir/*" -DestinationPath "dist/${{ matrix.name }}.zip"
+
+      - name: Package (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          dir=dist/${{ matrix.name }}
+          mkdir -p "$dir"
+          cp target/${{ matrix.target }}/release/liquiddrop "$dir/liquiddrop"
+          chmod +x "$dir/liquiddrop"
+          cp README.md LICENSE "$dir/"
+          tar -C dist -czf dist/${{ matrix.name }}.tar.gz ${{ matrix.name }}
+
+      - name: Build and package (macOS universal .app)
+        if: matrix.os == 'macos-latest'
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          APP=dist/LiquidDrop.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          lipo -create -output "$APP/Contents/MacOS/liquiddrop" \
+            target/aarch64-apple-darwin/release/liquiddrop \
+            target/x86_64-apple-darwin/release/liquiddrop
+          sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
+          mkdir -p icon.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s packaging/macos/icon-512.png --out icon.iconset/icon_${s}x${s}.png >/dev/null
+            d=$((s*2))
+            if [ $d -le 512 ]; then
+              sips -z $d $d packaging/macos/icon-512.png --out icon.iconset/icon_${s}x${s}@2x.png >/dev/null
+            fi
+          done
+          iconutil -c icns icon.iconset -o "$APP/Contents/Resources/LiquidDrop.icns"
+          codesign --force --deep -s - "$APP"
+          (cd dist && ditto -c -k --keepParent LiquidDrop.app ${{ matrix.name }}.zip)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          # Tags like v5.0.0-beta.1 become pre-releases, so testing doesn't look like a launch.
+          prerelease: ${{ contains(github.ref_name, '-') }}
